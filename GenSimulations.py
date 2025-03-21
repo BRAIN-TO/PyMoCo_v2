@@ -94,8 +94,8 @@ motion_lv_list = ['moderate', 'large']
 #-------------------------Image Acquisition Simulation--------------------------
 #-------------------------------------------------------------------------------
 #Load data
-dpath = r'/home/nghiemb/Data/CC' ##CHANGE TO DIRECTORY OF CLEAN DATA
 mpath = r'/home/nghiemb/PyMoCo' ##CHANGE TO MAIN WORKING DIRECTORY
+dpath = r'/home/nghiemb/PyMoCo/data' ##CHANGE TO DIRECTORY OF CLEAN DATA
 cnn_path = mpath + r'/cnn/3DUNet_SAP'
 spath = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
 m_files = sorted(os.listdir(os.path.join(dpath,'m_complex'))) #alphanumeric order
