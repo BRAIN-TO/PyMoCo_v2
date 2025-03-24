@@ -187,3 +187,46 @@ for i in range(len(PE1_sliding_window)):
 # U_temp = _gen_U_n(U_sliding_window[9], m_GT.shape)
 
 
+#---------------------------------------------------------------------------
+#Loading in vivo data with continuous head motion
+mpath_sub1 = r'/home/nghiemb/Data/TWH/MPRAGE_PE1Reordered/Scan20231204/Sub1/h5data'
+dpath_sub1 = mpath_sub1 + r'/scan1-ContinuousMotion-16shots/npy'
+gt_name_sub1 = r'scan1-ContinuousMotion-16shots/npy'
+cerebrum_slice_sub1 = 190
+paths_sub1 = [mpath_sub1, dpath_sub1, gt_name_sub1, cerebrum_slice_sub1]
+
+
+
+s_corrupted = xp.load(dpath + r'/kdat_trunc.npy') #NC, SI, AP, LR
+if sub == 4:
+    C_init = xp.load(dpath + r'/sens.npy')
+else:
+    C_init = xp.load(mpath + r'/{}/sens.npy'.format(gt_name))
+C = xp.transpose(C_init, (3,0,1,2))
+mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
+del C_init
+#---------------------------------------
+U = np.load(dpath + r'/samp_order.npy', allow_pickle=1) #LR, AP, SI
+#---------------------------------------------------------------------------
+res = xp.array([1,1,1])
+#---------------------------------------
+# 
+# maxval = abs(m_GT.flatten()).max()
+# m_GT /= maxval
+# s_corrupted /= maxval
+try:
+    m_GT = xp.load(mpath + r'/{}/img_CG.npy'.format(gt_name)) ###I THINK I'VE OVERWRITTEN IMG_CG, SO MAXVAL NOW = 1
+except:
+    m_GT = xp.ones(s_corrupted.shape[1:]) #BYPASSING LOADING M_GT
+maxval = abs(m_GT.flatten()).max()
+m_GT /= maxval
+s_corrupted /= maxval
+#---------------------------------------
+#Loading the skull-stripping mask, generated from FreeSurfer SynthStrip tool
+cerebrum_mask = xp.ones(m_GT.shape)
+cerebrum_mask = cerebrum_mask.at[cerebrum_slice:,...].set(0)
+#---------------------------------------
+#Motion trajectory
+R_pad = (10, 10, 10)
+batch = 1
+
