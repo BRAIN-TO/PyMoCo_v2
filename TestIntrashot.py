@@ -12,8 +12,11 @@ import numpy as np
 
 import jax
 import jax.numpy as xp
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
+# os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '' #TEMPORARY force to use CPU
+print(jax.numpy.ones(3).device()) # TFRT_CPU_0
 
 import encode.encode_op as eop
 import recon.recon_op as rec
@@ -94,8 +97,8 @@ motion_lv_list = ['moderate', 'large']
 #-------------------------Image Acquisition Simulation--------------------------
 #-------------------------------------------------------------------------------
 #Load data
-mpath = r'/home/nghiemb/PyMoCo' ##CHANGE TO MAIN WORKING DIRECTORY
-dpath = r'/home/nghiemb/PyMoCo/data' ##CHANGE TO DIRECTORY OF CLEAN DATA
+mpath = r'/home/nghiemb/PyMoCo' ####CHANGE TO MAIN WORKING DIRECTORY
+dpath = r'/home/nghiemb/Data/CC' ####CHANGE TO DIRECTORY OF CLEAN DATA
 cnn_path = mpath + r'/cnn/3DUNet_SAP'
 spath = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
 m_files = sorted(os.listdir(os.path.join(dpath,'m_complex'))) #alphanumeric order
@@ -103,71 +106,84 @@ C_files = sorted(os.listdir(os.path.join(dpath, 'sens')))
 
 nsims = 2 # number of motion simulations per subject per motion level
 IQM_store = []
+
 #-------------------------------------------------------------------------------
 t1 = time()
 count = 1
-for i in range(len(m_files)):
-    t3 = time()
-    print("Subject {}".format(str(i+1)))
-    #---------------------------------------------------------------------------
-    #Load data
-    m_fname = os.path.join(dpath,'m_complex',m_files[i])
-    C_fname = os.path.join(dpath,'sens',C_files[i])
-    m_GT = xp.load(m_fname)
-    C = xp.load(C_fname); C = xp.transpose(C, axes = (3,2,0,1))
-    res = xp.array([1,1,1])
-    #
-    m_GT = m_GT / xp.max(abs(m_GT.flatten())) #rescale
-    mask = rec.getMask(C)
-    plib.Path(os.path.join(dpath,'mask')).mkdir(parents=True, exist_ok=True)
-    mask_name = os.path.join(dpath,'mask','mask_' + m_files[i][10:])
-    xp.save(mask_name, mask)
-    #---------------------------------------------------------------------------
-    #Sampling pattern, for Calgary-Campinas brain data (12 coils, [PE:218,RO:256,SL:170])
-    PE1 = m_GT.shape[0] #LR
-    PE2 = m_GT.shape[1] #AP
-    RO = m_GT.shape[2] #SI
-    #
-    Rs = 1
-    TR_shot = 16
-    order = 'interleaved'
-    U_array = xp.transpose(msi.make_samp(xp.transpose(m_GT, (1,0,2)), \
-                                    Rs, TR_shot, order=order), (0,2,1,3)).astype('int16')
-    U = eop._U_Array2List(U_array, m_GT.shape)
-    #---------------------------------------------------------------------------
-    #Generate motion trace
-    for j, motion_lv in enumerate(motion_lv_list):
-        for k in range(nsims):
-            print("Sim {} for Subject {}".format(str(j+1), str(i+1)))
-            rand_keys = _gen_key(i, j, k)
-            Mtraj_GT = _gen_traj(rand_keys, motion_lv, len(U), motion_specs)
-            Mtraj_init = xp.zeros((len(U), 6))
-            #-------------------------------------------------------------------
-            R_pad = (10,10,10) #zero-pad image before rotations to prevent wrap-arounds; pads are automatically removed after rotations
-            batch = 1
-            s_corrupted = eop.Encode(m_GT, C, U, Mtraj_GT, res, batch=batch)
-            #-------------------------------------------------------------------
-            #Reconstruct image via EH, since data is fully-sampled
-            m_corrupted = eop.Encode_Adj(s_corrupted, C, U, Mtraj_init, res, batch=batch)
-            m_corrupted_PE = mtc.evalPE(m_corrupted, m_GT, mask=mask)
-            m_corrupted_SSIM = mtc.evalSSIM(m_corrupted, m_GT, mask=mask)
-            m_corrupted_loss = [m_corrupted_PE, m_corrupted_SSIM]
-            IQM_store.append(m_corrupted_loss)
-            xp.save(spath + r'/IQM_store.npy', IQM_store)
-            #
-            #save the filename, motion trajectory, simulated k-space and image
-            output = [m_files[i], Mtraj_GT, s_corrupted, m_corrupted, m_corrupted_loss, U]
-            s_path_temp = os.path.join(spath, motion_lv)
-            plib.Path(s_path_temp).mkdir(parents=True, exist_ok=True)
-            xp.save(s_path_temp + r'/train_dat{}.npy'.format((i+1)+(k*67)), output)
-    t4 = time()
-    print("Time elapsed for Subject {}: {} sec".format(str(i+1), str(t4 - t3)))
-    #
+
+i = 0
+
+t3 = time()
+print("Subject {}".format(str(i+1)))
+#---------------------------------------------------------------------------
+#Load data
+m_fname = os.path.join(dpath,'m_complex',m_files[i])
+C_fname = os.path.join(dpath,'sens',C_files[i])
+m_GT = xp.load(m_fname)
+C = xp.load(C_fname); C = xp.transpose(C, axes = (3,2,0,1))
+res = xp.array([1,1,1])
+
+m_GT = m_GT / xp.max(abs(m_GT.flatten())) #rescale
+mask = rec.getMask(C)
+# plib.Path(os.path.join(dpath,'mask')).mkdir(parents=True, exist_ok=True)
+# mask_name = os.path.join(dpath,'mask','mask_' + m_files[i][10:])
+# xp.save(mask_name, mask)
+#---------------------------------------------------------------------------
+#Sampling pattern, for Calgary-Campinas brain data (12 coils, [PE:218,RO:256,SL:170])
+PE1 = m_GT.shape[0] #LR
+PE2 = m_GT.shape[1] #AP
+RO = m_GT.shape[2] #SI
 #
+Rs = 1
+TR_shot = 16
+order = 'interleaved'
+# U_array = xp.transpose(msi.make_samp(xp.transpose(m_GT, (1,0,2)), \
+#                                 Rs, TR_shot, order=order), (0,2,1,3)).astype('int16')
+# U = eop._U_Array2List(U_array, m_GT.shape); del U_array
+# np.save(r'/home/nghiemb/Data/CC/U_list_16TR.npy', U)
 
-print("Finished simulating training data")
-t2 = time()
-print("Total elapsed time: {} min".format(str((t2 - t1)/60)))
+U = np.load(r'/home/nghiemb/Data/CC/U_list_16TR.npy', allow_pickle=1)
 
+#---------------------------------------------------------------------------
+#Generate sliding window
+import itertools
+
+def _U_Array2List(U, m_shape):
+    U_list = []
+    for i in range(U.shape[0]):
+        RO_temp = xp.arange(0, m_shape[0])
+        PE1_temp = xp.where(U[i,0,:,0] == 1)[0]
+        PE2_temp = xp.arange(0, m_shape[2])
+        U_list.append([RO_temp, PE1_temp, PE2_temp])
+    return U_list
+
+def _gen_U_n(U_vals, m_shape):
+    #Lazy evaluation of sampling pattern
+    U_RO = xp.zeros(m_shape[0]); U_RO = U_RO.at[U_vals[0]].set(1) 
+    U_PE1 = xp.zeros(m_shape[1]); U_PE1 = U_PE1.at[U_vals[1]].set(1)
+    U_PE2 = xp.zeros(m_shape[2]); U_PE2 = U_PE2.at[U_vals[2]].set(1)    
+    return np.multiply.outer(U_RO, xp.outer(U_PE1, U_PE2))
+
+
+PE1_combined_init = [list(U[i][1]) for i in range(len(U))]
+PE1_combined = list(itertools.chain.from_iterable(PE1_combined_init))
+
+strides = [0,7] #takes value between [0, 15]
+PE1_sliding_window = []
+for shot_nominal_iter in range(len(U)):
+    for stride in strides:
+        window_temp = PE1_combined[TR_shot*shot_nominal_iter+stride:TR_shot*(shot_nominal_iter+1)+stride]
+        PE1_sliding_window.append(window_temp)
+
+U_sliding_window = []
+U_RO_vals = U[0][0]
+U_PE2_vals = U[0][2]
+for i in range(len(PE1_sliding_window)):
+    U_PE1_vals = np.asarray(PE1_sliding_window[i])
+    U_vals_temp = np.asarray([U_RO_vals, U_PE1_vals, U_PE2_vals])
+    U_sliding_window.append(U_vals_temp)
+
+
+# U_temp = _gen_U_n(U_sliding_window[9], m_GT.shape)
 
 
