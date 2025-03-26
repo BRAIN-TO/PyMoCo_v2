@@ -168,7 +168,9 @@ def _gen_U_n(U_vals, m_shape):
 PE1_combined_init = [list(U[i][1]) for i in range(len(U))]
 PE1_combined = list(itertools.chain.from_iterable(PE1_combined_init))
 
-strides = [0,7] #takes value between [0, 15]
+strides = [0,8] #takes value between [0, 15]
+# strides = [0,4,8,12] #takes value between [0, 15]
+# strides = [0,2,4,6,8,10,12,14] #takes value between [0, 15]
 PE1_sliding_window = []
 for shot_nominal_iter in range(len(U)):
     for stride in strides:
