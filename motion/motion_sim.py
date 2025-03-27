@@ -9,6 +9,54 @@ import jax
 import jax.numpy as xp
 import warnings
 
+
+#-------------------------------------------------------------------------------
+def _gen_traj_dof(rand_key, motion_lv, dof, nshots, motion_specs):
+    '''
+    Input:
+        rand_key=jax.random.PRNGKey object,
+        motion_lv={'mild','moderate','severe'},
+        dof={'Tx','Ty','Tz','Rx','Ry','Rz'}
+        nshots=int # of motion states
+    Output:
+        xp.array of motion trajectory for a given DOF
+    '''
+    p_val = motion_specs[motion_lv][dof][1]
+    p_array = xp.array([p_val/2, 1-p_val, p_val/2])
+    opts = xp.array([-1,0,1]) #move back, stay, move fwd
+    maxval = motion_specs[motion_lv][dof][0]
+    minval = maxval / 2
+    array = jax.random.choice(rand_key, a = opts, shape=(nshots-1,), p = p_array) #binary array
+    array = xp.concatenate((xp.array([0]), array)) #ensure first motion state is origin
+    vals = jax.random.uniform(rand_key, shape=(nshots,),minval=minval, maxval=maxval) #displacements
+    return xp.cumsum(array * vals) #absolute value of motion trajectory
+
+def _gen_traj(rand_keys, motion_lv, nshots, motion_specs):
+    '''
+    Input:
+        rand_key=jax.random.PRNGKey object,
+        motion_lv={'mild','moderate','severe'},
+        nshots=int # of motion states
+    Output:
+        xp.array of motion trajectory across all 6 DOFs
+    '''
+    out_array = xp.zeros((nshots, 6))
+    out_array = out_array.at[:,0].set(_gen_traj_dof(rand_keys[0], motion_lv, 'Tx', nshots, motion_specs))
+    out_array = out_array.at[:,1].set(_gen_traj_dof(rand_keys[1], motion_lv, 'Ty', nshots, motion_specs))
+    out_array = out_array.at[:,2].set(_gen_traj_dof(rand_keys[2], motion_lv, 'Tz', nshots, motion_specs))
+    out_array = out_array.at[:,3].set(_gen_traj_dof(rand_keys[3], motion_lv, 'Rx', nshots, motion_specs))
+    out_array = out_array.at[:,4].set(_gen_traj_dof(rand_keys[4], motion_lv, 'Ry', nshots, motion_specs))
+    out_array = out_array.at[:,5].set(_gen_traj_dof(rand_keys[5], motion_lv, 'Rz', nshots, motion_specs))
+    return out_array
+
+def _gen_seq(i,j,k,dof):
+    a1 = (i+j+dof+1)**2 + (5*j)**2 + (17*i)**2 + (k*1206)**2 #including the exponent to guarantee different random value than training dataset
+    return a1
+
+def _gen_key(i, j, k):
+    return [jax.random.PRNGKey(_gen_seq(i,j,k,dof)) for dof in range(6)]
+
+
 #-------------------------------------------------------------------------------
 def seq_order(U_sum,m,Rs,TR_shot,nshots,mode='array'):
     '''Sequential k-space sampling order'''
