@@ -110,13 +110,13 @@ def make_samp(m, Rs, TR_shot, order='interleaved', tile_dims = None, mode = 'arr
     #---------------------------------------------------------------------------
     #Generating different sampling orderings
     if order == "sequential":
-        U = seq_order(U_sum, m, Rs, TR_shot, nshots)
+        U = seq_order(U_sum, m, Rs, TR_shot, nshots, mode)
     elif order == "interleaved":
-        U = int_order(U_sum, m, Rs, TR_shot, nshots)
+        U = int_order(U_sum, m, Rs, TR_shot, nshots, mode)
     # elif order == "disorder":
     #     U = dis_order(m,Rs,tile_dims)
     else:
         warnings.warn("Error: sampling order not yet implemented; defaulting to sequential order")
-        U = seq_order(U_sum, m, Rs, TR_shot, nshots)
+        U = seq_order(U_sum, m, Rs, TR_shot, nshots, mode)
     #
     return U
