@@ -11,7 +11,7 @@ import warnings
 
 
 #-------------------------------------------------------------------------------
-def _gen_traj_dof(rand_key, motion_lv, dof, nshots, motion_specs):
+def _gen_traj_dof(rand_key, dof, nshots, motion_spec, specs_scale):
     '''
     Input:
         rand_key=jax.random.PRNGKey object,
@@ -21,17 +21,17 @@ def _gen_traj_dof(rand_key, motion_lv, dof, nshots, motion_specs):
     Output:
         xp.array of motion trajectory for a given DOF
     '''
-    p_val = motion_specs[motion_lv][dof][1]
+    p_val = motion_spec[dof][1]*specs_scale
     p_array = xp.array([p_val/2, 1-p_val, p_val/2])
     opts = xp.array([-1,0,1]) #move back, stay, move fwd
-    maxval = motion_specs[motion_lv][dof][0]
+    maxval = motion_spec[dof][0]*specs_scale
     minval = maxval / 2
     array = jax.random.choice(rand_key, a = opts, shape=(nshots-1,), p = p_array) #binary array
     array = xp.concatenate((xp.array([0]), array)) #ensure first motion state is origin
     vals = jax.random.uniform(rand_key, shape=(nshots,),minval=minval, maxval=maxval) #displacements
     return xp.cumsum(array * vals) #absolute value of motion trajectory
 
-def _gen_traj(rand_keys, motion_lv, nshots, motion_specs):
+def _gen_traj(rand_keys, nshots, motion_spec, specs_scale=1):
     '''
     Input:
         rand_key=jax.random.PRNGKey object,
@@ -41,12 +41,12 @@ def _gen_traj(rand_keys, motion_lv, nshots, motion_specs):
         xp.array of motion trajectory across all 6 DOFs
     '''
     out_array = xp.zeros((nshots, 6))
-    out_array = out_array.at[:,0].set(_gen_traj_dof(rand_keys[0], motion_lv, 'Tx', nshots, motion_specs))
-    out_array = out_array.at[:,1].set(_gen_traj_dof(rand_keys[1], motion_lv, 'Ty', nshots, motion_specs))
-    out_array = out_array.at[:,2].set(_gen_traj_dof(rand_keys[2], motion_lv, 'Tz', nshots, motion_specs))
-    out_array = out_array.at[:,3].set(_gen_traj_dof(rand_keys[3], motion_lv, 'Rx', nshots, motion_specs))
-    out_array = out_array.at[:,4].set(_gen_traj_dof(rand_keys[4], motion_lv, 'Ry', nshots, motion_specs))
-    out_array = out_array.at[:,5].set(_gen_traj_dof(rand_keys[5], motion_lv, 'Rz', nshots, motion_specs))
+    out_array = out_array.at[:,0].set(_gen_traj_dof(rand_keys[0], 'Tx', nshots, motion_spec, specs_scale))
+    out_array = out_array.at[:,1].set(_gen_traj_dof(rand_keys[1], 'Ty', nshots, motion_spec, specs_scale))
+    out_array = out_array.at[:,2].set(_gen_traj_dof(rand_keys[2], 'Tz', nshots, motion_spec, specs_scale))
+    out_array = out_array.at[:,3].set(_gen_traj_dof(rand_keys[3], 'Rx', nshots, motion_spec, specs_scale))
+    out_array = out_array.at[:,4].set(_gen_traj_dof(rand_keys[4], 'Ry', nshots, motion_spec, specs_scale))
+    out_array = out_array.at[:,5].set(_gen_traj_dof(rand_keys[5], 'Rz', nshots, motion_spec, specs_scale))
     return out_array
 
 def _gen_seq(i,j,k,dof):
