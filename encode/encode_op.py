@@ -210,6 +210,7 @@ def Encode(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
     nshots = len(U)
     s_out = xp.zeros(C.shape, dtype = C.dtype)
     for n in range(nshots):
+        print("Shot {}".format(n+1), end='\r')
         U_n = msi._gen_U_n(U[n], input.shape)
         s_out += _E_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
     return s_out
@@ -225,6 +226,7 @@ def Encode_Adj(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
     nshots = len(U)
     m_out = xp.zeros(C.shape[1:], dtype = C.dtype)
     for n in range(nshots):
+        print("Shot {}".format(n+1), end='\r')
         U_n = msi._gen_U_n(U[n], input.shape[1:])
         m_out += _EH_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
     return m_out
