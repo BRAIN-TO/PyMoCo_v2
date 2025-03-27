@@ -8,6 +8,7 @@ import os
 import pathlib as plib
 from time import time
 from functools import partial
+import itertools
 import numpy as np
 
 import jax
@@ -22,60 +23,50 @@ import encode.encode_op as eop
 import recon.recon_op as rec
 import cnn.run_unet as cnn
 import utils.metrics as mtc
+import utils.visualize as vis
 import motion.motion_sim as msi
 
-#-------------------------------------------------------------------------------
-#-------------------------------------------------------------------------------
-#Helper Functions
-def _gen_traj_dof(rand_key, motion_lv, dof, nshots, motion_specs):
-    '''
-    Input:
-        rand_key=jax.random.PRNGKey object,
-        motion_lv={'mild','moderate','severe'},
-        dof={'Tx','Ty','Tz','Rx','Ry','Rz'}
-        nshots=int # of motion states
-    Output:
-        xp.array of motion trajectory for a given DOF
-    '''
-    p_val = motion_specs[motion_lv][dof][1]
-    p_array = xp.array([p_val/2, 1-p_val, p_val/2])
-    opts = xp.array([-1,0,1]) #move back, stay, move fwd
-    maxval = motion_specs[motion_lv][dof][0]
-    minval = maxval / 2
-    array = jax.random.choice(rand_key, a = opts, shape=(nshots-1,), p = p_array) #binary array
-    array = xp.concatenate((xp.array([0]), array)) #ensure first motion state is origin
-    vals = jax.random.uniform(rand_key, shape=(nshots,),minval=minval, maxval=maxval) #displacements
-    return xp.cumsum(array * vals) #absolute value of motion trajectory
-
-def _gen_traj(rand_keys, motion_lv, nshots, motion_specs):
-    '''
-    Input:
-        rand_key=jax.random.PRNGKey object,
-        motion_lv={'mild','moderate','severe'},
-        nshots=int # of motion states
-    Output:
-        xp.array of motion trajectory across all 6 DOFs
-    '''
-    out_array = xp.zeros((nshots, 6))
-    out_array = out_array.at[:,0].set(_gen_traj_dof(rand_keys[0], motion_lv, 'Tx', nshots, motion_specs))
-    out_array = out_array.at[:,1].set(_gen_traj_dof(rand_keys[1], motion_lv, 'Ty', nshots, motion_specs))
-    out_array = out_array.at[:,2].set(_gen_traj_dof(rand_keys[2], motion_lv, 'Tz', nshots, motion_specs))
-    out_array = out_array.at[:,3].set(_gen_traj_dof(rand_keys[3], motion_lv, 'Rx', nshots, motion_specs))
-    out_array = out_array.at[:,4].set(_gen_traj_dof(rand_keys[4], motion_lv, 'Ry', nshots, motion_specs))
-    out_array = out_array.at[:,5].set(_gen_traj_dof(rand_keys[5], motion_lv, 'Rz', nshots, motion_specs))
-    return out_array
-
-def _gen_seq(i,j,k,dof):
-    a1 = (i+j+dof+1)**2 + (5*j)**2 + (17*i)**2 + (k*1206)**2 #including the exponent to guarantee different random value than training dataset
-    return a1
-
-def _gen_key(i, j, k):
-    return [jax.random.PRNGKey(_gen_seq(i,j,k,dof)) for dof in range(6)]
 
 #-------------------------------------------------------------------------------
+#-------------------------Image Acquisition Simulation--------------------------
 #-------------------------------------------------------------------------------
-#Set up motion sim specs
-# motion_lv_list = ['mild', 'moderate', 'severe']
+#Load data
+mpath = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1E'
+case = 1
+test_case = 'Test{}'.format(case)
+dpath = mpath + r'/{}'.format(test_case)
+spath = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Intrashot/Paradigm_1D'
+
+res = xp.array([1,1,1])
+m_GT_init = xp.load(dpath + r'/current_test_GT.npy') #SI, LR, AP
+m_GT = xp.pad(m_GT_init[:,:,:,0,0] + 1j*m_GT_init[:,:,:,1,0], ((1,1), (0,0), (0,0)))
+del m_GT_init
+C = xp.load(dpath + r'/sens.npy')
+
+mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
+cerebrum_mask = xp.ones(m_GT.shape)
+
+#Transpose to reorient as LR, AP, SI
+m_GT = xp.transpose(m_GT, (1,2,0))
+m_GT = xp.abs(m_GT[6:-6, 3:-3, :])
+
+#---------------------------------------
+TR = 1.6 #T1w MPRAGE acquisition parameter
+Rs = 1 #SENSE acceleration factor
+TR_shot = 16
+print("Simulated motion temporal resolution: {} sec".format(TR * TR_shot))
+
+U = msi.make_samp(m_GT, Rs, TR_shot, order='interleaved', mode = 'list')
+
+#---------------------------------------
+#Generating discrete random motion trajectory
+
+# TR_shot_effective = 2
+# U_len_effective = m_GT.shape[1]//TR_shot_effective
+# r_scale = (TR_shot_effective / 16) * 4 #NEED TO ADJUST AS DESIRED
+# p_scale = (TR_shot_effective / 16) * 2 #NEED TO ADJUST AS DESIRED
+# specs_scale = [r_scale, p_scale]
+specs_scale = [1, 1]
 
 mild_specs = {'Tx':[0.1,0.1],'Ty':[0.2,0.15],'Tz':[0.2,0.15],\
             'Rx':[0.2,0.15],'Ry':[0.1,0.1],'Rz':[0.1,0.1]} #[max_rate, prob]
@@ -87,83 +78,134 @@ severe_specs2 = {'Tx':[0.8,0.3],'Ty':[1.8,0.6],'Tz':[1.8,0.6],\
             'Rx':[2,0.6],'Ry':[1.0,0.3],'Rz':[1.0,0.3]} #Double the max_rate and probability
 severe_specs3 = {'Tx':[1.6,0.6],'Ty':[3.6,1.0],'Tz':[3.6,1.0],\
             'Rx':[4,1.0],'Ry':[2.0,0.6],'Rz':[2.0,0.6]} #Quadruple the probability
+motion_specs = {'moderate':moderate_specs,'severe1':severe_specs1,\
+                'severe2':severe_specs2, 'severe3':severe_specs3}
 
-motion_specs = {'mild':moderate_specs,'moderate':severe_specs1,\
-                'large':severe_specs2,'extreme':severe_specs3}
+motion_lv = 'severe1'
+j = 1; k = 1 #legacy parameters, from training dataset script
+rand_keys = msi._gen_key(60+case, j, k)
+Mtraj_GT = msi._gen_traj(rand_keys, len(U), motion_specs.get(motion_lv), specs_scale)
 
-motion_lv_list = ['moderate', 'large']
+# vis.plot_Mtraj(Mtraj_GT, Mtraj_GT, m_GT.shape, rescale = 0)
 
-#-------------------------------------------------------------------------------
-#-------------------------Image Acquisition Simulation--------------------------
-#-------------------------------------------------------------------------------
-#Load data
-mpath = r'/home/nghiemb/PyMoCo' ####CHANGE TO MAIN WORKING DIRECTORY
-dpath = r'/home/nghiemb/Data/CC' ####CHANGE TO DIRECTORY OF CLEAN DATA
-cnn_path = mpath + r'/cnn/3DUNet_SAP'
-spath = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
-m_files = sorted(os.listdir(os.path.join(dpath,'m_complex'))) #alphanumeric order
-C_files = sorted(os.listdir(os.path.join(dpath, 'sens')))
 
-nsims = 2 # number of motion simulations per subject per motion level
-IQM_store = []
+#---------------------------------------
+#SIMULATING INTRASHOT MOTION --> SMOOTH [LINEAR] INTERPOLATION (NO OTHER CHANGES)
 
-#-------------------------------------------------------------------------------
+TR_shot_effective = 2
+U_dscale = TR_shot//TR_shot_effective
+U_effective = msi._U_subdivide(U, U_dscale)
+
+Mtraj_GT_effective = msi.Mtraj_interp(Mtraj_GT, U_dscale)
+# vis.plot_Mtraj(Mtraj_GT_effective, Mtraj_GT_effective, m_GT.shape, rescale = 0)
+
+#Apply motion simulation
+R_pad = (10, 10, 10)
+batch = 1
 t1 = time()
-count = 1
+s_corrupted = eop.Encode(m_GT, C, U_effective, Mtraj_GT, res, batch=batch)
+t2 = time()
+print("Elapsed time for effective temporal res of {} sec: {} sec".format(TR * TR_shot_effective, t2 - t1))
 
-i = 0
 
-t3 = time()
-print("Subject {}".format(str(i+1)))
+
+'''
+
+
 #---------------------------------------------------------------------------
-#Load data
-m_fname = os.path.join(dpath,'m_complex',m_files[i])
-C_fname = os.path.join(dpath,'sens',C_files[i])
-m_GT = xp.load(m_fname)
-C = xp.load(C_fname); C = xp.transpose(C, axes = (3,2,0,1))
-res = xp.array([1,1,1])
-
-m_GT = m_GT / xp.max(abs(m_GT.flatten())) #rescale
-mask = rec.getMask(C)
-# plib.Path(os.path.join(dpath,'mask')).mkdir(parents=True, exist_ok=True)
-# mask_name = os.path.join(dpath,'mask','mask_' + m_files[i][10:])
-# xp.save(mask_name, mask)
+#------------------JOINT IMAGE RECON AND MOTION ESTIMATION------------------
 #---------------------------------------------------------------------------
-#Sampling pattern, for Calgary-Campinas brain data (12 coils, [PE:218,RO:256,SL:170])
-PE1 = m_GT.shape[0] #LR
-PE2 = m_GT.shape[1] #AP
-RO = m_GT.shape[2] #SI
+#Initializing update vars
+Mtraj_init = xp.zeros((len(U), 6))
+Mtraj_est = Mtraj_init
+CG_maxiter = 3 #limit CG_iter to 3 iters for fully-sampled data to prevent artifacts
+ME_maxiter = 1 #motion estimation maxiter
+LS_maxiter = 20 #line search maxiter for BFGS algorithm
+CG_tol = 1e-7 #relative tolerance
+CG_atol = 1e-4 #absolute tolerance
+CG_lamda = 0
+CG_mask = 0 #turn on for in-vivo dataset, turn off for simulated dataset
+#Initialize stores
+m_loss_store = []
+m_cnn_store = []
+Mtraj_store = []
+DC_store = []
+#---------------------------------------------------------------------------
+#Reconstruct image via EH, since data is fully-sampled
+m_init = eop.Encode_Adj(s_corrupted, C, U, Mtraj_init, res, batch=batch) #E.H*s
+#Motion-corrupted reconstruction
+A = partial(eop._EH_E, C=C, U=U, Mtraj=Mtraj_est, res=res, \
+            lamda = CG_lamda, batch=batch)
+b = eop.Encode_Adj(s_corrupted, C, U, Mtraj_est, res, batch=batch)
 #
-Rs = 1
-TR_shot = 16
-order = 'interleaved'
-# U_array = xp.transpose(msi.make_samp(xp.transpose(m_GT, (1,0,2)), \
-#                                 Rs, TR_shot, order=order), (0,2,1,3)).astype('int16')
-# U = eop._U_Array2List(U_array, m_GT.shape); del U_array
-# np.save(r'/home/nghiemb/Data/CC/U_list_16TR.npy', U)
+m_corrupted = m_init
+#----------------------------------------
+m_est_rmse = mtc.evalPE(m_corrupted, m_GT, mask)
+m_est_ssim = mtc.evalSSIM(m_corrupted, m_GT, mask=mask)
+m_loss_store.append([m_est_rmse, m_est_ssim])
+print("RMSE of Corrupted Image: {:.2f} %".format(m_est_rmse))
+print("SSIM of Corrupted Image: {}".format(m_est_ssim))
+m_est = m_corrupted
+#---------------------------------------------------------------------------
+#Loading trained CNN model
+# NB. UNet takes in data as [LR, AP, SI]
+# For my Data (SI, AP, LR), need to transpose --> (2,1,0)
+cnn_path = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP'
+# wpath_severe = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
+# wpath_moderate = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
+# wpath_mild = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
+wpath = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP/weights/PE1_AP/Complex/combo/train_n240_sequential'
+wpath_severe = wpath; wpath_moderate = wpath; wpath_mild = wpath
+pads = [11,3]
+#---------------------------------------------------------------------------
+#Alternating image & motion estimation (coordinate descent)
+rmse_tol = 0.0 #impossible
+ssim_tol = 2.0 #impossible
+trans_axes = (0,1,2,0) 
+cnn_flag = test_flag[0] #turn on / off CNN
+JE_flag = test_flag[1] #turn JE algorithm on / off
+thresh = {'severe': 500, 'moderate': 0.1}
+if JE_flag and cnn_flag: #UNet + JE
+    spath = spath_root + r'/w_cnn_SEQUENTIAL_RETRAINEDUNET2_2025-02-22'
+    max_loops = 200
+elif JE_flag and not cnn_flag: #only JE
+    spath = spath_root + r'/wo_cnn_SEQUENTIAL_RETRAINEDUNET2_2025-02-22'
+    max_loops = 200
+elif not JE_flag and cnn_flag: #only UNet
+    spath = spath_root + r'/w_only_cnn_SEQUENTIAL_RETRAINEDUNET2_2025-02-22'
+    max_loops = 1
+plib.Path(spath).mkdir(parents=True, exist_ok=True)
+xp.save(spath + r'/m_corrupted.npy', m_corrupted)
+xp.save(spath + r'/Mtraj.npy', Mtraj_GT)
+xp.save(spath + r'/s_corrupted_mag.npy', s_corrupted)
+#
+#---------------------------------------------------------------------------
+dscale = 1
+continuity = 0
+grad_tol = 1e-4 #
+JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, \
+                CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
+CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath_severe, wpath_moderate, wpath_mild, thresh]
+init_est = [m_est, Mtraj_est]
+fixed_vars = [m_init, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
+#
+DC_store.append(rec.eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
+xp.save(spath + r"/DC_store.npy", DC_store)
+DC_init_alt = rec._f(Mtraj_init, m_est=m_corrupted, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
+xp.save(spath + r"/DC_init_alt.npy", DC_init_alt)
+#
+stores = [m_cnn_store, Mtraj_store, m_loss_store, DC_store]
+m_est, m_loss_store, Mtraj_store, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
+                                                                stores, cnn, \
+                                                                CNN_params, JE_params)
+#
 
-U = np.load(r'/home/nghiemb/Data/CC/U_list_16TR.npy', allow_pickle=1)
+
+
 
 #---------------------------------------------------------------------------
 #Generate sliding window
-import itertools
-
-def _U_Array2List(U, m_shape):
-    U_list = []
-    for i in range(U.shape[0]):
-        RO_temp = xp.arange(0, m_shape[0])
-        PE1_temp = xp.where(U[i,0,:,0] == 1)[0]
-        PE2_temp = xp.arange(0, m_shape[2])
-        U_list.append([RO_temp, PE1_temp, PE2_temp])
-    return U_list
-
-def _gen_U_n(U_vals, m_shape):
-    #Lazy evaluation of sampling pattern
-    U_RO = xp.zeros(m_shape[0]); U_RO = U_RO.at[U_vals[0]].set(1) 
-    U_PE1 = xp.zeros(m_shape[1]); U_PE1 = U_PE1.at[U_vals[1]].set(1)
-    U_PE2 = xp.zeros(m_shape[2]); U_PE2 = U_PE2.at[U_vals[2]].set(1)    
-    return np.multiply.outer(U_RO, xp.outer(U_PE1, U_PE2))
-
+#---------------------------------------
 
 PE1_combined_init = [list(U[i][1]) for i in range(len(U))]
 PE1_combined = list(itertools.chain.from_iterable(PE1_combined_init))
@@ -186,9 +228,17 @@ for i in range(len(PE1_sliding_window)):
     U_sliding_window.append(U_vals_temp)
 
 
-# U_temp = _gen_U_n(U_sliding_window[9], m_GT.shape)
+# U_temp = msi._gen_U_n(U_sliding_window[9], m_GT.shape)
 
 
+'''
+
+
+
+
+'''
+#---------------------------------------------------------------------------
+#-------------------------IN VIVO CONTINUOUS MOTION-------------------------
 #---------------------------------------------------------------------------
 #Loading in vivo data with continuous head motion
 mpath_sub1 = r'/home/nghiemb/Data/TWH/MPRAGE_PE1Reordered/Scan20231204/Sub1/h5data'
@@ -207,9 +257,8 @@ else:
 C = xp.transpose(C_init, (3,0,1,2))
 mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
 del C_init
-#---------------------------------------
+
 U = np.load(dpath + r'/samp_order.npy', allow_pickle=1) #LR, AP, SI
-#---------------------------------------------------------------------------
 res = xp.array([1,1,1])
 #---------------------------------------
 # 
@@ -223,12 +272,16 @@ except:
 maxval = abs(m_GT.flatten()).max()
 m_GT /= maxval
 s_corrupted /= maxval
+
 #---------------------------------------
 #Loading the skull-stripping mask, generated from FreeSurfer SynthStrip tool
 cerebrum_mask = xp.ones(m_GT.shape)
 cerebrum_mask = cerebrum_mask.at[cerebrum_slice:,...].set(0)
+
 #---------------------------------------
 #Motion trajectory
 R_pad = (10, 10, 10)
 batch = 1
 
+
+'''
