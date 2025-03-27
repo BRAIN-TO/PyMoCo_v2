@@ -58,6 +58,23 @@ def _gen_key(i, j, k):
     return [jax.random.PRNGKey(_gen_seq(i,j,k,dof)) for dof in range(6)]
 
 
+#------------------------------------
+#Functions for interpolating existing motion trajectories
+def interp_1d(array, dscale):
+    xpoints_init = np.arange(0,array.shape[0])
+    xpoints_target = np.arange(0,array.shape[0],1/dscale)
+    array_out = xp.interp(xpoints_target, xpoints_init, array)
+    return array_out
+
+def Mtraj_interp(Mtraj, dscale):
+    Mtraj_out = xp.zeros((Mtraj.shape[0]*dscale,6))
+    for i in range(Mtraj.shape[1]):
+        array_temp = Mtraj[:,i]
+        array_out = interp_1d(array_temp, dscale)
+        Mtraj_out = Mtraj_out.at[:,i].set(array_out)
+    #
+    return Mtraj_out
+
 #-------------------------------------------------------------------------------
 #Functions for generating sampling pattern
 def seq_order(U_sum,m,Rs,TR_shot,nshots,mode='array'):
