@@ -8,7 +8,7 @@ Created on Sun Mar 7 9:15:00 2021
 import jax
 import jax.numpy as xp
 import warnings
-
+import numpy as np
 
 #-------------------------------------------------------------------------------
 #Functions for generating random motion trajectories
