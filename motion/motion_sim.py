@@ -21,17 +21,17 @@ def _gen_traj_dof(rand_key, dof, nshots, motion_spec, specs_scale):
     Output:
         xp.array of motion trajectory for a given DOF
     '''
-    p_val = motion_spec[dof][1]*specs_scale
+    p_val = motion_spec[dof][1]*specs_scale[1]
     p_array = xp.array([p_val/2, 1-p_val, p_val/2])
     opts = xp.array([-1,0,1]) #move back, stay, move fwd
-    maxval = motion_spec[dof][0]*specs_scale
+    maxval = motion_spec[dof][0]*specs_scale[0]
     minval = maxval / 2
     array = jax.random.choice(rand_key, a = opts, shape=(nshots-1,), p = p_array) #binary array
     array = xp.concatenate((xp.array([0]), array)) #ensure first motion state is origin
     vals = jax.random.uniform(rand_key, shape=(nshots,),minval=minval, maxval=maxval) #displacements
     return xp.cumsum(array * vals) #absolute value of motion trajectory
 
-def _gen_traj(rand_keys, nshots, motion_spec, specs_scale=1):
+def _gen_traj(rand_keys, nshots, motion_spec, specs_scale=[1,1]):
     '''
     Input:
         rand_key=jax.random.PRNGKey object,
