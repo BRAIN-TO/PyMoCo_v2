@@ -11,6 +11,7 @@ import warnings
 
 
 #-------------------------------------------------------------------------------
+#Functions for generating random motion trajectories
 def _gen_traj_dof(rand_key, dof, nshots, motion_spec, specs_scale):
     '''
     Input:
@@ -58,6 +59,7 @@ def _gen_key(i, j, k):
 
 
 #-------------------------------------------------------------------------------
+#Functions for generating sampling pattern
 def seq_order(U_sum,m,Rs,TR_shot,nshots,mode='array'):
     '''Sequential k-space sampling order'''
     if mode == 'array':
@@ -131,3 +133,57 @@ def make_samp(m, Rs, TR_shot, order='interleaved', tile_dims = None, mode = 'arr
         U = seq_order(U_sum, m, Rs, TR_shot, nshots, mode)
     #
     return U
+
+
+#-------------------------------------------------------------------------------
+#Functions for altering existing sampling pattern
+def _U_Array2List(U, m_shape):
+    U_list = []
+    for i in range(U.shape[0]):
+        RO_temp = xp.arange(0, m_shape[0])
+        PE1_temp = xp.where(U[i,0,:,0] == 1)[0]
+        PE2_temp = xp.arange(0, m_shape[2])
+        U_list.append([RO_temp, PE1_temp, PE2_temp])
+    return U_list
+
+def _gen_U_n(U_vals, m_shape):
+    #Lazy evaluation of sampling pattern
+    U_RO = xp.zeros(m_shape[0]); U_RO = U_RO.at[U_vals[0]].set(1) 
+    U_PE1 = xp.zeros(m_shape[1]); U_PE1 = U_PE1.at[U_vals[1]].set(1)
+    U_PE2 = xp.zeros(m_shape[2]); U_PE2 = U_PE2.at[U_vals[2]].set(1)    
+    return np.multiply.outer(U_RO, xp.outer(U_PE1, U_PE2))
+
+def _U_subdivide(U, dscale):
+    #Subdivide U into finer temporal resolution
+    U_temp = []
+    for n in range(len(U)):
+        RO_temp = U[n][0]
+        PE2_temp = U[n][2]
+        PE1_temp = U[n][1]
+        for m in range(dscale):
+            ind1 = m*PE1_temp.shape[0]//dscale
+            ind2 = (m+1)*PE1_temp.shape[0]//dscale
+            if len(PE1_temp[ind1:ind2])==0: #if exceeded number of PE1 steps in the shot
+                pass
+            else:
+                U_temp.append([RO_temp, PE1_temp[ind1:ind2], PE2_temp])
+        #
+    return U_temp   
+
+def _U_combine(U, upscale):
+    U_temp = []
+    upscale_inds = xp.arange(0,len(U), upscale)
+    for i, ind in enumerate(upscale_inds):
+        start = ind
+        if i == len(upscale_inds)-1:
+            end = len(U)
+        else:
+            end = ind+2
+        RO_temp = U[i][0]
+        PE2_temp = U[i][2]
+        PE1_temp = []
+        for j in range(start,end):
+            PE1_temp.append(U[j][1])
+        PE1_temp = xp.asarray(PE1_temp).flatten()
+        U_temp.append([RO_temp, PE1_temp, PE2_temp])
+    return U_temp
