@@ -12,6 +12,8 @@ from functools import partial
 from itertools import zip_longest
 import numpy as np
 
+import motion.motion_sim as msi
+
 #%%-----------------------------------------------------------------------------
 #--------------------------------HELPER FUNCTIONS-------------------------------
 #%%-----------------------------------------------------------------------------
@@ -162,56 +164,6 @@ def Rotate(input, R, res, pad, mode='fwd'):
 #%%-----------------------------------------------------------------------------
 #--------------------------------ENCODING MODEL---------------------------------
 #%%-----------------------------------------------------------------------------
-def _U_Array2List(U, m_shape):
-    U_list = []
-    for i in range(U.shape[0]):
-        RO_temp = xp.arange(0, m_shape[0])
-        PE1_temp = xp.where(U[i,0,:,0] == 1)[0]
-        PE2_temp = xp.arange(0, m_shape[2])
-        U_list.append([RO_temp, PE1_temp, PE2_temp])
-    return U_list
-
-def _gen_U_n(U_vals, m_shape):
-    #Lazy evaluation of sampling pattern
-    U_RO = xp.zeros(m_shape[0]); U_RO = U_RO.at[U_vals[0]].set(1) 
-    U_PE1 = xp.zeros(m_shape[1]); U_PE1 = U_PE1.at[U_vals[1]].set(1)
-    U_PE2 = xp.zeros(m_shape[2]); U_PE2 = U_PE2.at[U_vals[2]].set(1)    
-    return np.multiply.outer(U_RO, xp.outer(U_PE1, U_PE2))
-
-def _U_subdivide(U, dscale):
-    #Subdivide U into finer temporal resolution
-    U_temp = []
-    for n in range(len(U)):
-        RO_temp = U[n][0]
-        PE2_temp = U[n][2]
-        PE1_temp = U[n][1]
-        for m in range(dscale):
-            ind1 = m*PE1_temp.shape[0]//dscale
-            ind2 = (m+1)*PE1_temp.shape[0]//dscale
-            if len(PE1_temp[ind1:ind2])==0: #if exceeded number of PE1 steps in the shot
-                pass
-            else:
-                U_temp.append([RO_temp, PE1_temp[ind1:ind2], PE2_temp])
-        #
-    return U_temp   
-
-def _U_combine(U, upscale):
-    U_temp = []
-    upscale_inds = xp.arange(0,len(U), upscale)
-    for i, ind in enumerate(upscale_inds):
-        start = ind
-        if i == len(upscale_inds)-1:
-            end = len(U)
-        else:
-            end = ind+2
-        RO_temp = U[i][0]
-        PE2_temp = U[i][2]
-        PE1_temp = []
-        for j in range(start,end):
-            PE1_temp.append(U[j][1])
-        PE1_temp = xp.asarray(PE1_temp).flatten()
-        U_temp.append([RO_temp, PE1_temp, PE2_temp])
-    return U_temp
 
 def _E_n(U_n, R_n, T_n, m=None, C=None, res=None, R_pad=None): #Apply forward encoding operator for single shot
     #Apply FWD encoding
@@ -247,17 +199,6 @@ def _E_n_alt(U_n, R_n, T_n, m=None, C=None, res=None, R_pad=None): #Apply forwar
     s_n = _fft(CTROm, (1,2,3))
     return s_n
 
-
-# @partial(jit, static_argnums = (5,)) #R_pad is static argument due to explicit ref in pad / unpad
-# def _E_vmap(input, C, res, U_n, R_n, R_pad, T_n):
-#     fmap = vmap(_E_n, in_axes = (0, 0, 0, None, None, None, None), out_axes = 0)
-#     return fmap(U_n, R_n, T_n, input, C, res, R_pad)
-
-# @partial(jit, static_argnums = (5,)) #R_pad is static argument due to explicit ref in pad / unpad
-# def _EH_vmap(input, C, res, U_n, R_n, R_pad, T_n):
-#     fmap = vmap(_EH_n, in_axes = (0, 0, 0, None, None, None, None), out_axes = 0)
-#     return fmap(U_n, R_n, T_n, input, C, res, R_pad)
-
 # @partial(jit, static_argnums = (5,)) #R_pad is static argument due to explicit ref in pad / unpad
 def Encode(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
     '''
@@ -267,19 +208,9 @@ def Encode(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
     OUT: signal (s)
     '''
     nshots = len(U)
-    #Vectorize U, R, T input for E
-    # U_vmap = xp.array_split(U, len(U) // batch, axis = 0)
-    # R_vmap = xp.array_split(Mtraj[:, 3:], Mtraj.shape[0] // batch, axis = 0)
-    # T_vmap = xp.array_split(Mtraj[:, :3], Mtraj.shape[0] // batch, axis = 0)
-    # #Run vectorized E
-    # s_out = xp.zeros(C.shape, dtype = C.dtype)
-    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
-    #     s_vmap = _E_vmap(input, C, res, U_n, R_n, R_pad, T_n)
-    #     s_out += xp.sum(s_vmap, axis=0)
-    # #
     s_out = xp.zeros(C.shape, dtype = C.dtype)
     for n in range(nshots):
-        U_n = _gen_U_n(U[n], input.shape)
+        U_n = msi._gen_U_n(U[n], input.shape)
         s_out += _E_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
     return s_out
 
@@ -292,19 +223,9 @@ def Encode_Adj(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
     OUT: image (m)
     '''
     nshots = len(U)
-    # #Vectorize U, R, T input for EH
-    # U_vmap = xp.array_split(U, U.shape[0] // batch, axis = 0)
-    # R_vmap = xp.array_split(Mtraj[:, 3:], Mtraj.shape[0] // batch, axis = 0)
-    # T_vmap = xp.array_split(Mtraj[:, :3], Mtraj.shape[0] // batch, axis = 0)
-    # #Run vectorized EH
-    # m_out = xp.zeros(C.shape[1:], dtype = C.dtype)
-    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
-    #     m_vmap = _EH_vmap(input, C, res, U_n, R_n, R_pad, T_n)
-    #     m_out += xp.sum(m_vmap, axis=0)
-    # #
     m_out = xp.zeros(C.shape[1:], dtype = C.dtype)
     for n in range(nshots):
-        U_n = _gen_U_n(U[n], input.shape[1:])
+        U_n = msi._gen_U_n(U[n], input.shape[1:])
         m_out += _EH_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
     return m_out
 
@@ -313,30 +234,13 @@ def Encode_Adj(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
 def _EH_E(input, C=None, U=None, Mtraj=None, res=None, lamda = 0, R_pad = (0,0,0), batch = 1):
     '''Applying EHE, for use in recon.ImageRecon (CG SENSE)'''
     nshots = len(U)
-    #Vectorize U, R, T input for E
-    # U_vmap = xp.array_split(U, len(U) // batch, axis = 0)
-    # R_vmap = xp.array_split(Mtraj[:, 3:], Mtraj.shape[0] // batch, axis = 0)
-    # T_vmap = xp.array_split(Mtraj[:, :3], Mtraj.shape[0] // batch, axis = 0)
-    # #Run vectorized E
-    # s_out = xp.zeros(C.shape, dtype = C.dtype)
-    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
-    #     s_vmap = _E_vmap(input, C, res, U_n, R_n, R_pad, T_n)
-    #     s_out += xp.sum(s_vmap, axis=0)
-    # #
-    # #
     s_out = xp.zeros(C.shape, dtype = C.dtype)
     for n in range(nshots):
-        U_n = _gen_U_n(U[n], input.shape)
+        U_n = msi._gen_U_n(U[n], input.shape)
         s_out += _E_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
-    # #Run vectorized EH
-    # m_out = xp.zeros(input.shape[1:], dtype = input.dtype)
-    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
-    #     m_vmap = _EH_vmap(s_out, C, res, U_n, R_n, R_pad, T_n)
-    #     m_out += xp.sum(m_vmap, axis=0)
-    # #
     m_out = xp.zeros(C.shape[1:], dtype = C.dtype)
     for n in range(nshots):
-        U_n = _gen_U_n(U[n], s_out.shape[1:])
+        U_n = msi._gen_U_n(U[n], s_out.shape[1:])
         m_out += _EH_n(U_n, Mtraj[n,3:], Mtraj[n,:3], s_out, C, res, R_pad)
     #
     return m_out + lamda * xp.ones(m_out.shape, dtype=m_out.dtype)
