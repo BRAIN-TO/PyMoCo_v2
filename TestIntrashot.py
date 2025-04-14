@@ -11,12 +11,19 @@ from functools import partial
 import itertools
 import numpy as np
 
+CPU_FLAG = 1 #TEMPORARY force to use CPU
+if CPU_FLAG:
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1' 
+    os.environ['JAX_PLATFORMS'] = 'cpu'
+else:
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['JAX_PLATFORMS'] = 'gpu'
+    #
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
+    os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
 import jax
 import jax.numpy as xp
-# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
-# os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1' #TEMPORARY force to use CPU
 
 import encode.encode_op as eop
 import recon.recon_op as rec
@@ -24,7 +31,6 @@ import cnn.run_unet as cnn
 import utils.metrics as mtc
 import utils.visualize as vis
 import motion.motion_sim as msi
-
 
 #-------------------------------------------------------------------------------
 #-------------------------Image Acquisition Simulation--------------------------
