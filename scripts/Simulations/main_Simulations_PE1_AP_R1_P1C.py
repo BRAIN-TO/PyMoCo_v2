@@ -125,8 +125,8 @@ def main(dpath, spath_root, mpath, gt_name, test_flag, case):
     JE_flag = test_flag[1] #turn JE algorithm on / off
     thresh = {'severe': 500, 'moderate': 0.1}
     if JE_flag and cnn_flag: #UNet + JE
-        spath = spath_root + r'/w_cnn_ReIm_AugmentedTraining_April-11-2025'
-        max_loops = 100
+        spath = spath_root + r'/w_cnn_ReIm_AugmentedTraining_April-14-2025'
+        max_loops = 200
     elif JE_flag and not cnn_flag: #only JE
         # spath = spath_root + r'/wo_cnn_100Iters_July-10-2024'
         # max_loops = 100
