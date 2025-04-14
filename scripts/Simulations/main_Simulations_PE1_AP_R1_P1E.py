@@ -164,7 +164,7 @@ if __name__ == "__main__":
     mpath = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1E'
     cases = [1,4,5,6,7]
     for case in cases:
-        test_flags = [[1,0]] #[CNN, JE]
+        test_flags = [[1,1]] #[CNN, JE]
         for test_flag in test_flags:
             test_case = 'Test{}'.format(case)
             gt_name = test_case
