@@ -15,12 +15,19 @@ from functools import partial
 import itertools
 import numpy as np
 
+CPU_FLAG = 1 #TEMPORARY force to use CPU
+if CPU_FLAG:
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1' 
+    os.environ['JAX_PLATFORMS'] = 'cpu'
+else:
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    os.environ['JAX_PLATFORMS'] = 'gpu'
+    #
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
+    os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
 import jax
 import jax.numpy as xp
-# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
-# os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1' #TEMPORARY force to use CPU
 
 import encode.encode_op as eop
 import recon.recon_op as rec
@@ -34,24 +41,18 @@ import motion.motion_sim as msi
 #-------------------------Image Acquisition Simulation--------------------------
 #-------------------------------------------------------------------------------
 #Load data
-mpath = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1E'
-case = 1
+mpath = r'/cluster/projects/uludag/Brian/PyMoCo_v2'
+case = 1 #4, 5, 6, 7
 test_case = 'Test{}'.format(case)
-dpath = mpath + r'/{}'.format(test_case)
-spath = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Intrashot/Paradigm_1D'
+dpath = mpath + r'/data/Simulations/{}'.format(test_case)
+
 
 res = xp.array([1,1,1])
-m_GT_init = xp.load(dpath + r'/current_test_GT.npy') #SI, LR, AP
-m_GT = xp.pad(m_GT_init[:,:,:,0,0] + 1j*m_GT_init[:,:,:,1,0], ((1,1), (0,0), (0,0)))
-del m_GT_init
-C = xp.load(dpath + r'/sens.npy')
+m_GT = xp.load(dpath + r'/m_complex/img_CG.npy') #SI, LR, AP
+C = xp.load(dpath + r'/sens/sens.npy')
 
-mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
+mask = rec.getMask(C)
 cerebrum_mask = xp.ones(m_GT.shape)
-
-#Transpose to reorient as LR, AP, SI
-m_GT = xp.transpose(m_GT, (1,2,0))
-m_GT = xp.abs(m_GT[6:-6, 3:-3, :])
 
 #---------------------------------------
 TR = 1.6 #T1w MPRAGE acquisition parameter
@@ -69,7 +70,7 @@ U = msi.make_samp(m_GT, Rs, TR_shot, order='interleaved', mode = 'list')
 # r_scale = (TR_shot_effective / 16) * 4 #NEED TO ADJUST AS DESIRED
 # p_scale = (TR_shot_effective / 16) * 2 #NEED TO ADJUST AS DESIRED
 # specs_scale = [r_scale, p_scale]
-specs_scale = [1, 1]
+specs_scale = [1, 1] # [r_scale, p_scale]
 
 mild_specs = {'Tx':[0.1,0.1],'Ty':[0.2,0.15],'Tz':[0.2,0.15],\
             'Rx':[0.2,0.15],'Ry':[0.1,0.1],'Rz':[0.1,0.1]} #[max_rate, prob]
@@ -95,7 +96,7 @@ Mtraj_GT = msi._gen_traj(rand_keys, len(U), motion_specs.get(motion_lv), specs_s
 #---------------------------------------
 #SIMULATING INTRASHOT MOTION --> SMOOTH [LINEAR] INTERPOLATION (NO OTHER CHANGES)
 
-TR_shot_effective = 2
+TR_shot_effective = TR_shot // 2
 U_dscale = TR_shot//TR_shot_effective
 U_effective = msi._U_subdivide(U, U_dscale)
 
@@ -106,14 +107,37 @@ Mtraj_GT_effective = msi.Mtraj_interp(Mtraj_GT, U_dscale)
 R_pad = (10, 10, 10)
 batch = 1
 t1 = time()
-s_corrupted = eop.Encode(m_GT, C, U_effective, Mtraj_GT, res, batch=batch)
+s_corrupted = eop.Encode(m_GT, C, U_effective, Mtraj_GT, res, batch=batch) #on h4h server CPU, 1 shot takes 20 seconds! 
 t2 = time()
 print("Elapsed time for effective temporal res of {} sec: {} sec".format(TR * TR_shot_effective, t2 - t1))
 
 
+#-------------------------------------------------------------------------------
+#-----------------------Sliding Window Motion Estimation------------------------
+#-------------------------------------------------------------------------------
+
+#---------------------------------------------------------------------------
+dscale = 1
+continuity = 0
+grad_tol = 1e-4 #
+JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, \
+                CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
+CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath, wpath, wpath, thresh]
+init_est = [m_est, Mtraj_est]
+fixed_vars = [m_init, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
+#
+DC_store.append(rec.eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
+xp.save(spath + r"/DC_store.npy", DC_store)
+DC_init_alt = rec._f(Mtraj_init, m_est=m_corrupted, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
+xp.save(spath + r"/DC_init_alt.npy", DC_init_alt)
+#
+stores = [m_cnn_store, Mtraj_store, m_loss_store, DC_store]
+m_est, m_loss_store, Mtraj_store, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
+                                                                stores, cnn, \
+                                                                CNN_params, JE_params)
+
 
 '''
-
 
 #---------------------------------------------------------------------------
 #------------------JOINT IMAGE RECON AND MOTION ESTIMATION------------------
