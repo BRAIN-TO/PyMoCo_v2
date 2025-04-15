@@ -4,7 +4,8 @@ Generate Training Dataset with Simulated Motion Correction
 Test data will be provided upon request
 
 If working on the h4h server:
-- salloc -p gpu --account-uludag_gpu --gres=gpu:100:1 -C gpu32g -t 1:00:00 -c 4 --mem 40G
+
+salloc -p gpu --account=uludag_gpu --gres=gpu:v100:1 -C gpu32g -t 1:00:00 -c 4 --mem 100G
 
 """
 
@@ -21,7 +22,7 @@ if CPU_FLAG:
     os.environ['JAX_PLATFORMS'] = 'cpu'
 else:
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    os.environ['JAX_PLATFORMS'] = 'gpu'
+    os.environ['JAX_PLATFORMS'] = 'cuda'
     #
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
     os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
@@ -96,7 +97,8 @@ Mtraj_GT = msi._gen_traj(rand_keys, len(U), motion_specs.get(motion_lv), specs_s
 #---------------------------------------
 #SIMULATING INTRASHOT MOTION --> SMOOTH [LINEAR] INTERPOLATION (NO OTHER CHANGES)
 
-TR_shot_effective = TR_shot // 2
+dscale = 4
+TR_shot_effective = TR_shot // dscale
 U_dscale = TR_shot//TR_shot_effective
 U_effective = msi._U_subdivide(U, U_dscale)
 
@@ -107,37 +109,12 @@ Mtraj_GT_effective = msi.Mtraj_interp(Mtraj_GT, U_dscale)
 R_pad = (10, 10, 10)
 batch = 1
 t1 = time()
-s_corrupted = eop.Encode(m_GT, C, U_effective, Mtraj_GT, res, batch=batch) #on h4h server CPU, 1 shot takes 20 seconds! 
+s_corrupted = eop.Encode(m_GT, C, U_effective, Mtraj_GT_effective, res, batch=batch) #on h4h server CPU, 1 shot takes 20 seconds! 
 t2 = time()
 print("Elapsed time for effective temporal res of {} sec: {} sec".format(TR * TR_shot_effective, t2 - t1))
 
+U = U_effective
 
-#-------------------------------------------------------------------------------
-#-----------------------Sliding Window Motion Estimation------------------------
-#-------------------------------------------------------------------------------
-
-#---------------------------------------------------------------------------
-dscale = 1
-continuity = 0
-grad_tol = 1e-4 #
-JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, \
-                CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
-CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath, wpath, wpath, thresh]
-init_est = [m_est, Mtraj_est]
-fixed_vars = [m_init, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
-#
-DC_store.append(rec.eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
-xp.save(spath + r"/DC_store.npy", DC_store)
-DC_init_alt = rec._f(Mtraj_init, m_est=m_corrupted, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
-xp.save(spath + r"/DC_init_alt.npy", DC_init_alt)
-#
-stores = [m_cnn_store, Mtraj_store, m_loss_store, DC_store]
-m_est, m_loss_store, Mtraj_store, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
-                                                                stores, cnn, \
-                                                                CNN_params, JE_params)
-
-
-'''
 
 #---------------------------------------------------------------------------
 #------------------JOINT IMAGE RECON AND MOTION ESTIMATION------------------
@@ -161,8 +138,7 @@ DC_store = []
 #Reconstruct image via EH, since data is fully-sampled
 m_init = eop.Encode_Adj(s_corrupted, C, U, Mtraj_init, res, batch=batch) #E.H*s
 #Motion-corrupted reconstruction
-A = partial(eop._EH_E, C=C, U=U, Mtraj=Mtraj_est, res=res, \
-            lamda = CG_lamda, batch=batch)
+A = partial(eop._EH_E, C=C, U=U, Mtraj=Mtraj_est, res=res, lamda = CG_lamda, batch=batch)
 b = eop.Encode_Adj(s_corrupted, C, U, Mtraj_est, res, batch=batch)
 #
 m_corrupted = m_init
@@ -178,33 +154,30 @@ m_est = m_corrupted
 # NB. UNet takes in data as [LR, AP, SI]
 # For my Data (SI, AP, LR), need to transpose --> (2,1,0)
 cnn_path = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP'
-# wpath_severe = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
-# wpath_moderate = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
-# wpath_mild = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
-wpath = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP/weights/PE1_AP/Complex/combo/train_n240_sequential'
-wpath_severe = wpath; wpath_moderate = wpath; wpath_mild = wpath
+wpath = cnn_path + r'/weights/PE1_AP/Complex/combo/train_n240_interleaved_P1EF_2025-04-02/slices'
 pads = [11,3]
 #---------------------------------------------------------------------------
 #Alternating image & motion estimation (coordinate descent)
 rmse_tol = 0.0 #impossible
 ssim_tol = 2.0 #impossible
 trans_axes = (0,1,2,0) 
-cnn_flag = test_flag[0] #turn on / off CNN
-JE_flag = test_flag[1] #turn JE algorithm on / off
+cnn_flag = 0
+JE_flag = 1
 thresh = {'severe': 500, 'moderate': 0.1}
 if JE_flag and cnn_flag: #UNet + JE
-    spath = spath_root + r'/w_cnn_SEQUENTIAL_RETRAINEDUNET2_2025-02-22'
+    spath = dpath + r'/Intrashot/Upres_{}x/M3_2025-04-15'.format(dscale)
     max_loops = 200
 elif JE_flag and not cnn_flag: #only JE
-    spath = spath_root + r'/wo_cnn_SEQUENTIAL_RETRAINEDUNET2_2025-02-22'
+    spath = dpath + r'/Intrashot/Upres_{}x/M2_2025-04-15'.format(dscale)
     max_loops = 200
 elif not JE_flag and cnn_flag: #only UNet
-    spath = spath_root + r'/w_only_cnn_SEQUENTIAL_RETRAINEDUNET2_2025-02-22'
+    spath = dpath + r'/Intrashot/Upres_{}x/M1_2025-04-15'.format(dscale)
     max_loops = 1
 plib.Path(spath).mkdir(parents=True, exist_ok=True)
 xp.save(spath + r'/m_corrupted.npy', m_corrupted)
-xp.save(spath + r'/Mtraj.npy', Mtraj_GT)
-xp.save(spath + r'/s_corrupted_mag.npy', s_corrupted)
+xp.save(spath + r'/s_corrupted.npy', s_corrupted)
+xp.save(spath + r'/U_effective.npy', U_effective)
+
 #
 #---------------------------------------------------------------------------
 dscale = 1
@@ -212,7 +185,7 @@ continuity = 0
 grad_tol = 1e-4 #
 JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, \
                 CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
-CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath_severe, wpath_moderate, wpath_mild, thresh]
+CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath, wpath, wpath, thresh]
 init_est = [m_est, Mtraj_est]
 fixed_vars = [m_init, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
 #
@@ -225,90 +198,109 @@ stores = [m_cnn_store, Mtraj_store, m_loss_store, DC_store]
 m_est, m_loss_store, Mtraj_store, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
                                                                 stores, cnn, \
                                                                 CNN_params, JE_params)
-#
 
-
-
-
-#---------------------------------------------------------------------------
-#Generate sliding window
-#---------------------------------------
-
-PE1_combined_init = [list(U[i][1]) for i in range(len(U))]
-PE1_combined = list(itertools.chain.from_iterable(PE1_combined_init))
-
-strides = [0,8] #takes value between [0, 15]
-# strides = [0,4,8,12] #takes value between [0, 15]
-# strides = [0,2,4,6,8,10,12,14] #takes value between [0, 15]
-PE1_sliding_window = []
-for shot_nominal_iter in range(len(U)):
-    for stride in strides:
-        window_temp = PE1_combined[TR_shot*shot_nominal_iter+stride:TR_shot*(shot_nominal_iter+1)+stride]
-        PE1_sliding_window.append(window_temp)
-
-U_sliding_window = []
-U_RO_vals = U[0][0]
-U_PE2_vals = U[0][2]
-for i in range(len(PE1_sliding_window)):
-    U_PE1_vals = np.asarray(PE1_sliding_window[i])
-    U_vals_temp = np.asarray([U_RO_vals, U_PE1_vals, U_PE2_vals])
-    U_sliding_window.append(U_vals_temp)
-
-
-# U_temp = msi._gen_U_n(U_sliding_window[9], m_GT.shape)
-
-
-'''
 
 
 
 
 '''
-#---------------------------------------------------------------------------
-#-------------------------IN VIVO CONTINUOUS MOTION-------------------------
-#---------------------------------------------------------------------------
-#Loading in vivo data with continuous head motion
-mpath_sub1 = r'/home/nghiemb/Data/TWH/MPRAGE_PE1Reordered/Scan20231204/Sub1/h5data'
-dpath_sub1 = mpath_sub1 + r'/scan1-ContinuousMotion-16shots/npy'
-gt_name_sub1 = r'scan1-ContinuousMotion-16shots/npy'
-cerebrum_slice_sub1 = 190
-paths_sub1 = [mpath_sub1, dpath_sub1, gt_name_sub1, cerebrum_slice_sub1]
+
+# import jax.numpy as xp
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+mpl.rcParams['axes.spines.right'] = False
+mpl.rcParams['axes.spines.top'] = False
+
+
+def plot_views(img, vmax = 1.0):
+    if vmax == "auto": #if auto, set as max val of volume
+        vmax = abs(img.flatten().detach().cpu()).max()
+    #
+    fig, axes = plt.subplots(1,3)
+    for i, ax in enumerate(axes):
+        if i==0:
+            ax.imshow(img[img.shape[0]//2,:,:], cmap = "gray", vmax = vmax)
+        if i==1:
+            ax.imshow(img[:,img.shape[1]//2,:], cmap = "gray", vmax = vmax)
+        if i==2:
+            ax.imshow(img[:,:,img.shape[2]//2], cmap = "gray", vmax = vmax)
+        #
+    plt.show()
+
+def plot_Mtraj(Mtraj_GT, Mtraj, img_dims, rescale = 0):
+    Nx, Ny, Nz = img_dims
+    if rescale:
+        Tx_scale = (Nx/2)
+        Ty_scale = (Ny/2)
+        Tz_scale = (Nz/2)
+        R_scale = 1/(np.pi/180)
+    else:
+        Tx_scale = 1; Ty_scale = 1; Tz_scale = 1
+        R_scale = 1
+    #
+    T_GT = Mtraj_GT[:,:3]
+    R_GT = Mtraj_GT[:,3:]
+    T = Mtraj[:,:3]
+    R = Mtraj[:,3:]
+    plt.figure()
+    plt.plot(T_GT[:,0]*Tx_scale, '--r', alpha = 0.75, label="Tx - GT")
+    plt.plot(T_GT[:,1]*Ty_scale, '--b', alpha = 0.75, label="Ty - GT")
+    plt.plot(T_GT[:,2]*Tz_scale, '--g', alpha = 0.75, label="Tz - GT")
+    plt.plot(T[:,0]*Tx_scale, 'r', label="Tx")
+    plt.plot(T[:,1]*Ty_scale, 'b', label="Ty")
+    plt.plot(T[:,2]*Tz_scale, 'g', label="Tz")
+    # plt.legend(loc="lower left")
+    plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5)
+    plt.ylabel("Translations (mm)")
+    plt.xlabel("Shot Index")
+    plt.title("Estimated Motion Trajectories: Translations")
+    plt.show()
+    #
+    plt.figure()
+    plt.plot(R_GT[:,0]*R_scale, '--r', alpha = 0.75, label="Rx - GT")
+    plt.plot(R_GT[:,1]*R_scale, '--b', alpha = 0.75, label="Ry - GT")
+    plt.plot(R_GT[:,2]*R_scale, '--g', alpha = 0.75, label="Rz - GT")
+    plt.plot(R[:,0]*R_scale, 'r', label="Rx")
+    plt.plot(R[:,1]*R_scale, 'b', label="Ry")
+    plt.plot(R[:,2]*R_scale, 'g', label="Rz")
+    # plt.legend(loc="upper left")
+    plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5)
+    plt.ylabel("Rotations (deg)")
+    plt.xlabel("Shot Index")
+    plt.title("Estimated Motion Trajectories: Rotations")
+    plt.show()
+
+
+DC_init = np.load("DC_init_alt.npy")
+DC_store = np.load("DC_store.npy"); DC_store[0] = DC_init
+
+plt.figure()
+plt.plot(DC_store, label = "JE")
+plt.xlabel("JE iteration")
+plt.ylabel("DC Loss")
+plt.title("Data Consistency Loss Trajectory for Outlier Test Case")
+plt.legend(loc = "upper right")
+plt.show()
 
 
 
-s_corrupted = xp.load(dpath + r'/kdat_trunc.npy') #NC, SI, AP, LR
-if sub == 4:
-    C_init = xp.load(dpath + r'/sens.npy')
-else:
-    C_init = xp.load(mpath + r'/{}/sens.npy'.format(gt_name))
-C = xp.transpose(C_init, (3,0,1,2))
-mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
-del C_init
+U_effective = np.load("U_effective.npy", allow_pickle=1)
 
-U = np.load(dpath + r'/samp_order.npy', allow_pickle=1) #LR, AP, SI
-res = xp.array([1,1,1])
-#---------------------------------------
-# 
-# maxval = abs(m_GT.flatten()).max()
-# m_GT /= maxval
-# s_corrupted /= maxval
-try:
-    m_GT = xp.load(mpath + r'/{}/img_CG.npy'.format(gt_name)) ###I THINK I'VE OVERWRITTEN IMG_CG, SO MAXVAL NOW = 1
-except:
-    m_GT = xp.ones(s_corrupted.shape[1:]) #BYPASSING LOADING M_GT
-maxval = abs(m_GT.flatten()).max()
-m_GT /= maxval
-s_corrupted /= maxval
 
-#---------------------------------------
-#Loading the skull-stripping mask, generated from FreeSurfer SynthStrip tool
-cerebrum_mask = xp.ones(m_GT.shape)
-cerebrum_mask = cerebrum_mask.at[cerebrum_slice:,...].set(0)
+Mtraj_store = np.load("Mtraj_store.npy", allow_pickle=1)
+Mtraj_GT = np.load("Mtraj_GT_effective.npy")
+Mtraj_final = Mtraj_store[-1][0]
 
-#---------------------------------------
-#Motion trajectory
-R_pad = (10, 10, 10)
-batch = 1
+m_corrupted = np.load("m_corrupted.npy")
+m_final = np.load("m_intmd.npy")
+
+plot_Mtraj(Mtraj_GT, Mtraj_final, m_final.shape)
+
+plot_views(abs(m_corrupted))
+plot_views(abs(m_final))
+
 
 
 '''
