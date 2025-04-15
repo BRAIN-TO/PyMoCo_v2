@@ -4,7 +4,6 @@ Generate Training Dataset with Simulated Motion Correction
 Test data will be provided upon request
 
 If working on the h4h server:
-
 salloc -p gpu --account=uludag_gpu --gres=gpu:v100:1 -C gpu32g -t 1:00:00 -c 4 --mem 100G
 
 """
@@ -16,6 +15,7 @@ from functools import partial
 import itertools
 import numpy as np
 
+# CPU_FLAG = 0
 CPU_FLAG = 1 #TEMPORARY force to use CPU
 if CPU_FLAG:
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1' 
@@ -39,14 +39,13 @@ import motion.motion_sim as msi
 
 
 #-------------------------------------------------------------------------------
-#-------------------------Image Acquisition Simulation--------------------------
+#---------------------------------LOADING DATA----------------------------------
 #-------------------------------------------------------------------------------
 #Load data
 mpath = r'/cluster/projects/uludag/Brian/PyMoCo_v2'
 case = 1 #4, 5, 6, 7
 test_case = 'Test{}'.format(case)
 dpath = mpath + r'/data/Simulations/{}'.format(test_case)
-
 
 res = xp.array([1,1,1])
 m_GT = xp.load(dpath + r'/m_complex/img_CG.npy') #SI, LR, AP
@@ -55,24 +54,17 @@ C = xp.load(dpath + r'/sens/sens.npy')
 mask = rec.getMask(C)
 cerebrum_mask = xp.ones(m_GT.shape)
 
-#---------------------------------------
-TR = 1.6 #T1w MPRAGE acquisition parameter
-Rs = 1 #SENSE acceleration factor
-TR_shot = 16
-print("Simulated motion temporal resolution: {} sec".format(TR * TR_shot))
+#Defining path to NN weights
+# NB. UNet takes in data as [LR, AP, SI]
+cnn_path = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP'
+wpath = cnn_path + r'/weights/PE1_AP/Complex/combo/train_n240_interleaved_P1EF_2025-04-02/slices'
+pads = [11,3]
 
-U = msi.make_samp(m_GT, Rs, TR_shot, order='interleaved', mode = 'list')
+#---------------------------------------------------------------------------
+#--------------------------MOTION SIMULATION BLOCK--------------------------
+#---------------------------------------------------------------------------
 
-#---------------------------------------
-#Generating discrete random motion trajectory
-
-# TR_shot_effective = 2
-# U_len_effective = m_GT.shape[1]//TR_shot_effective
-# r_scale = (TR_shot_effective / 16) * 4 #NEED TO ADJUST AS DESIRED
-# p_scale = (TR_shot_effective / 16) * 2 #NEED TO ADJUST AS DESIRED
-# specs_scale = [r_scale, p_scale]
-specs_scale = [1, 1] # [r_scale, p_scale]
-
+#Defining motion simulation parameters
 mild_specs = {'Tx':[0.1,0.1],'Ty':[0.2,0.15],'Tz':[0.2,0.15],\
             'Rx':[0.2,0.15],'Ry':[0.1,0.1],'Rz':[0.1,0.1]} #[max_rate, prob]
 moderate_specs = {'Tx':[0.2,0.1],'Ty':[0.4,0.2],'Tz':[0.4,0.2],\
@@ -86,6 +78,15 @@ severe_specs3 = {'Tx':[1.6,0.6],'Ty':[3.6,1.0],'Tz':[3.6,1.0],\
 motion_specs = {'moderate':moderate_specs,'severe1':severe_specs1,\
                 'severe2':severe_specs2, 'severe3':severe_specs3}
 
+#Setting up nominal motion trajectory
+TR = 1.6 #T1w MPRAGE acquisition parameter
+Rs = 1 #SENSE acceleration factor
+TR_shot = 16
+print("Simulated motion temporal resolution: {} sec".format(TR * TR_shot))
+
+U = msi.make_samp(m_GT, Rs, TR_shot, order='interleaved', mode = 'list')
+
+specs_scale = [1, 1] # [r_scale, p_scale]
 motion_lv = 'severe1'
 j = 1; k = 1 #legacy parameters, from training dataset script
 rand_keys = msi._gen_key(60+case, j, k)
@@ -93,8 +94,7 @@ Mtraj_GT = msi._gen_traj(rand_keys, len(U), motion_specs.get(motion_lv), specs_s
 
 # vis.plot_Mtraj(Mtraj_GT, Mtraj_GT, m_GT.shape, rescale = 0)
 
-
-#---------------------------------------
+#----------------------------------------
 #SIMULATING INTRASHOT MOTION --> SMOOTH [LINEAR] INTERPOLATION (NO OTHER CHANGES)
 
 dscale = 4
@@ -105,7 +105,7 @@ U_effective = msi._U_subdivide(U, U_dscale)
 Mtraj_GT_effective = msi.Mtraj_interp(Mtraj_GT, U_dscale)
 # vis.plot_Mtraj(Mtraj_GT_effective, Mtraj_GT_effective, m_GT.shape, rescale = 0)
 
-#Apply motion simulation
+#Apply motion simulation with interpolated trajectories
 R_pad = (10, 10, 10)
 batch = 1
 t1 = time()
@@ -113,15 +113,23 @@ s_corrupted = eop.Encode(m_GT, C, U_effective, Mtraj_GT_effective, res, batch=ba
 t2 = time()
 print("Elapsed time for effective temporal res of {} sec: {} sec".format(TR * TR_shot_effective, t2 - t1))
 
-U = U_effective
+#----------------------------------------
+#INITIAL IMAGE RECON, ASSUMING ZERO MOTION'
+U_zero = msi.make_samp(m_GT, 1, m_GT.shape[1], order='interleaved', mode = 'list')
+Mtraj_zero = xp.zeros((len(U_zero), 6))
+m_corrupted = eop.Encode_Adj(s_corrupted, C, U_zero, Mtraj_zero, res, batch=batch) #E.H*s
+m_est_rmse = mtc.evalPE(m_corrupted, m_GT, mask)
+m_est_ssim = mtc.evalSSIM(m_corrupted, m_GT, mask=mask)
 
+m_est = m_corrupted
+DC_init_alt = rec._f(Mtraj_zero, m_est=m_corrupted, C=C, res=res, \
+                     U=U_zero, R_pad=R_pad, s_corrupted=s_corrupted)
 
 #---------------------------------------------------------------------------
 #------------------JOINT IMAGE RECON AND MOTION ESTIMATION------------------
 #---------------------------------------------------------------------------
-#Initializing update vars
-Mtraj_init = xp.zeros((len(U), 6))
-Mtraj_est = Mtraj_init
+
+#Defining algorithm parameters
 CG_maxiter = 3 #limit CG_iter to 3 iters for fully-sampled data to prevent artifacts
 ME_maxiter = 1 #motion estimation maxiter
 LS_maxiter = 20 #line search maxiter for BFGS algorithm
@@ -129,76 +137,117 @@ CG_tol = 1e-7 #relative tolerance
 CG_atol = 1e-4 #absolute tolerance
 CG_lamda = 0
 CG_mask = 0 #turn on for in-vivo dataset, turn off for simulated dataset
-#Initialize stores
-m_loss_store = []
-m_cnn_store = []
-Mtraj_store = []
-DC_store = []
-#---------------------------------------------------------------------------
-#Reconstruct image via EH, since data is fully-sampled
-m_init = eop.Encode_Adj(s_corrupted, C, U, Mtraj_init, res, batch=batch) #E.H*s
-#Motion-corrupted reconstruction
-A = partial(eop._EH_E, C=C, U=U, Mtraj=Mtraj_est, res=res, lamda = CG_lamda, batch=batch)
-b = eop.Encode_Adj(s_corrupted, C, U, Mtraj_est, res, batch=batch)
-#
-m_corrupted = m_init
-#----------------------------------------
-m_est_rmse = mtc.evalPE(m_corrupted, m_GT, mask)
-m_est_ssim = mtc.evalSSIM(m_corrupted, m_GT, mask=mask)
-m_loss_store.append([m_est_rmse, m_est_ssim])
-print("RMSE of Corrupted Image: {:.2f} %".format(m_est_rmse))
-print("SSIM of Corrupted Image: {}".format(m_est_ssim))
-m_est = m_corrupted
-#---------------------------------------------------------------------------
-#Loading trained CNN model
-# NB. UNet takes in data as [LR, AP, SI]
-# For my Data (SI, AP, LR), need to transpose --> (2,1,0)
-cnn_path = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP'
-wpath = cnn_path + r'/weights/PE1_AP/Complex/combo/train_n240_interleaved_P1EF_2025-04-02/slices'
-pads = [11,3]
-#---------------------------------------------------------------------------
-#Alternating image & motion estimation (coordinate descent)
+
 rmse_tol = 0.0 #impossible
 ssim_tol = 2.0 #impossible
 trans_axes = (0,1,2,0) 
-cnn_flag = 0
-JE_flag = 1
+cnn_flag = 0 #binary, flag for using UNet
+JE_flag = 1 #binary, flag for using JE
 thresh = {'severe': 500, 'moderate': 0.1}
-if JE_flag and cnn_flag: #UNet + JE
-    spath = dpath + r'/Intrashot/Upres_{}x/M3_2025-04-15'.format(dscale)
-    max_loops = 200
-elif JE_flag and not cnn_flag: #only JE
-    spath = dpath + r'/Intrashot/Upres_{}x/M2_2025-04-15'.format(dscale)
-    max_loops = 200
-elif not JE_flag and cnn_flag: #only UNet
-    spath = dpath + r'/Intrashot/Upres_{}x/M1_2025-04-15'.format(dscale)
-    max_loops = 1
-plib.Path(spath).mkdir(parents=True, exist_ok=True)
-xp.save(spath + r'/m_corrupted.npy', m_corrupted)
-xp.save(spath + r'/s_corrupted.npy', s_corrupted)
-xp.save(spath + r'/U_effective.npy', U_effective)
 
-#
-#---------------------------------------------------------------------------
 dscale = 1
 continuity = 0
-grad_tol = 1e-4 #
-JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, \
+grad_tol = 1e-4 #threshold for finite dif of shotwise DC loss
+
+#Initialize stores
+m_loss_store = []
+m_loss_store.append([m_est_rmse, m_est_ssim])
+DC_store = []
+
+m_cnn_store = []
+Mtraj_store_lv1 = []
+
+
+if JE_flag and cnn_flag: #UNet + JE
+    spath = dpath + r'/Intrashot/Upres_{}x/Hierarchical/M3_2025-04-15'.format(dscale)
+    # max_loops = 200
+elif JE_flag and not cnn_flag: #only JE
+    spath = dpath + r'/Intrashot/Upres_{}x/Hierarchical/M2_2025-04-15'.format(dscale)
+    # max_loops = 200
+elif not JE_flag and cnn_flag: #only UNet
+    spath = dpath + r'/Intrashot/Upres_{}x/Hierarchical/M1_2025-04-15'.format(dscale)
+    # max_loops = 1
+
+plib.Path(spath).mkdir(parents=True, exist_ok=True)
+
+xp.save(spath + r'/Mtraj_GT.npy', Mtraj_GT_effective)
+xp.save(spath + r'/m_corrupted.npy', m_corrupted)
+xp.save(spath + r'/s_corrupted.npy', s_corrupted)
+xp.save(spath + r'/U_GT.npy', U_effective)
+xp.save(spath + r"/DC_init_alt.npy", DC_init_alt)
+
+#----------------------------------------
+#---------------------------LEVEL 1 --> 2x UPRES----------------------------
+
+max_loops_lv1 = 100
+
+dscale = 2
+TR_shot_effective = TR_shot // dscale
+U_dscale = TR_shot//TR_shot_effective
+U_effective = msi._U_subdivide(U, U_dscale) #REDEFINE THE SAMPLING PATTERN
+Mtraj_init = xp.zeros((len(U_effective), 6))
+Mtraj_est = Mtraj_init
+
+#Initializing update vars
+JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops_lv1, ME_maxiter, LS_maxiter, \
                 CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
 CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath, wpath, wpath, thresh]
 init_est = [m_est, Mtraj_est]
-fixed_vars = [m_init, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
-#
+fixed_vars = [m_corrupted, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
+
 DC_store.append(rec.eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
 xp.save(spath + r"/DC_store.npy", DC_store)
-DC_init_alt = rec._f(Mtraj_init, m_est=m_corrupted, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
-xp.save(spath + r"/DC_init_alt.npy", DC_init_alt)
+
 #
-stores = [m_cnn_store, Mtraj_store, m_loss_store, DC_store]
-m_est, m_loss_store, Mtraj_store, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
+stores = [m_cnn_store, Mtraj_store_lv1, m_loss_store, DC_store]
+m_est, m_loss_store, Mtraj_store_lv1, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
                                                                 stores, cnn, \
                                                                 CNN_params, JE_params)
 
+Mtraj_est_lv1 = Mtraj_store_lv1[-1][0]
+
+xp.save(spath + r'/m_est_lv1.npy', m_est)
+xp.save(spath + r'/Mtraj_store_lv1.npy', Mtraj_store_lv1)
+xp.save(spath + r'/Mtraj_final_lv1.npy', Mtraj_est_lv1)
+xp.save(spath + r'/m_loss_store_lv1.npy', m_loss_store)
+xp.save(spath + r'/DC_store_lv1.npy', DC_store)
+
+
+
+
+#---------------------------LEVEL 2 --> 4x UPRES----------------------------
+
+max_loops_lv2 = 50
+
+lv_scale = 2
+dscale *= lv_scale
+TR_shot_effective = TR_shot // dscale
+U_dscale = TR_shot//TR_shot_effective
+U_effective = msi._U_subdivide(U, U_dscale) #REDEFINE THE SAMPLING PATTERN
+
+Mtraj_est_lv2 = msi.Mtraj_interp(Mtraj_est_lv1, lv_scale)
+Mtraj_store_lv2 = []
+
+#Initializing update vars
+JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops_lv2, ME_maxiter, LS_maxiter, \
+                CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
+CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath, wpath, wpath, thresh]
+init_est = [m_est, Mtraj_est_lv2]
+fixed_vars = [m_corrupted, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
+
+#
+stores = [m_cnn_store, Mtraj_store_lv2, m_loss_store, DC_store]
+m_est, m_loss_store, Mtraj_store_lv2, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
+                                                                stores, cnn, \
+                                                                CNN_params, JE_params)
+
+Mtraj_est_lv2 = Mtraj_store_lv2[-1][0]
+
+xp.save(spath + r'/m_est_lv2.npy', m_est)
+xp.save(spath + r'/Mtraj_store_lv2.npy', Mtraj_store_lv2)
+xp.save(spath + r'/Mtraj_final_lv2.npy', Mtraj_est_lv2)
+xp.save(spath + r'/m_loss_store_lv2.npy', m_loss_store)
+xp.save(spath + r'/DC_store_lv2.npy', DC_store)
 
 
 
