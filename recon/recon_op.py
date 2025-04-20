@@ -331,6 +331,25 @@ def eval_TotalDC(Mtraj_est, fixed_vars, JE_params):
     return DC
 
 
+def eval_TotalDC_SlidingWindow(Mtraj_est, fixed_vars, JE_params):
+    x0, s_corrupted, C, U_list, _, res, _, _, R_pad, _ = fixed_vars
+    U_Step1, U_Step2 = U_list
+    _, _, _, _, _, _, _, CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, _, _ = JE_params
+    #
+    A_new = partial(eop._EH_E, C=C, U=U_Step2, Mtraj=Mtraj_est, res=res, lamda=0, batch=batch)
+    b_new = eop.Encode_Adj(s_corrupted, C, U_Step2, Mtraj_est, res, batch=batch)
+    #
+    if CG_mask:
+        m_out = ImageRecon(A_new, b_new, x0, mask = mask, maxiter=CG_maxiter, \
+                            tol=CG_tol, atol=CG_atol)
+    else:
+        m_out = ImageRecon(A_new, b_new, x0, maxiter=CG_maxiter, \
+                            tol=CG_tol, atol=CG_atol)
+    #
+    m_est = mask*m_out[-1]
+    DC = _f(Mtraj_est, m_est=m_est, C=C, res=res, U=U_Step2, R_pad=R_pad, s_corrupted=s_corrupted)
+    return DC
+
 #%% ----------------------------------------------------------------------------
 # -------------------------------JOINT ESTIMATION-------------------------------
 # ---------------------------MULTI-LEVEL OPTIMIZATION---------------------------
@@ -482,7 +501,7 @@ def JointEst_SlidingWindow(init_est, fixed_vars, stores, cnn, CNN_params, JE_par
                                         tol=CG_tol, atol=CG_atol)
                 m_est = mask*m_out[-1]
                 xp.save(spath + r"/m_intmd.npy", m_est)
-                DC_store.append(eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
+                DC_store.append(eval_TotalDC_SlidingWindow(Mtraj_est, fixed_vars, JE_params))
                 xp.save(spath + r"/DC_store.npy", DC_store)
         #
         m_est_rmse = mtc.evalPE(m_est, m_GT, mask)
