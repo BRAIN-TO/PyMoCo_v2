@@ -10,9 +10,9 @@ from jax.scipy.optimize import minimize
 from time import time
 from functools import partial
 
-from optimize.minimize import minimize as minimize_local # only for integrated loss function
 import encode.encode_op as eop
 import utils.metrics as mtc
+import motion.motion_sim as msi
 
 from scipy.ndimage import rotate
 import scipy.signal as ss
@@ -129,7 +129,7 @@ def _f_intra(Mtraj_est_n, m_est=None, C=None, res=None, U_shot=None, R_pad=None,
     #
     U_shot_full = xp.zeros(s_corrupted.shape)
     for i in range(len(U_shot)):
-        U_shot_full += eop._gen_U_n(U_shot[i], m_est.shape)
+        U_shot_full += msi._gen_U_n(U_shot[i], m_est.shape)
     #
     DC = s_n.flatten() - (U_shot_full*s_corrupted).flatten()
     return xp.abs(xp.dot(xp.conjugate(DC), DC)) #L2-norm
@@ -145,7 +145,7 @@ def _f_intra(Mtraj_est_n, m_est=None, C=None, res=None, U_shot=None, R_pad=None,
     #
     U_shot_full = xp.zeros(s_corrupted.shape)
     for i in range(len(U_shot)):
-        U_shot_full += eop._gen_U_n(U_shot[i], m_est.shape)
+        U_shot_full += msi._gen_U_n(U_shot[i], m_est.shape)
     #
     DC = s_n.flatten() - (U_shot_full*s_corrupted).flatten()
     return xp.abs(xp.dot(xp.conjugate(DC), DC)) #L2-norm
@@ -285,7 +285,7 @@ def MotionEst(Mtraj_est, m_est, C, U, dscale, res, s_corrupted, R_pad = (0,0,0),
     for n in range(nshots):
         print("Shot: {}".format(str(n+1)))
         t1 = time()
-        U_n = eop._gen_U_n(U[n], m_est.shape)
+        U_n = msi._gen_U_n(U[n], m_est.shape)
         if continuity and n>0: #enforce continuity for subsequent shots
                 Mtraj_est_n = Mtraj_out[n-1,:] #seed with updated estimate for previous shot
         else:
@@ -401,6 +401,78 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
                 A_new = partial(eop._EH_E, C=C, U=U, Mtraj=Mtraj_est, \
                                 res=res, lamda=0, batch=batch)
                 b_new = eop.Encode_Adj(s_corrupted, C, U, Mtraj_est, res, batch=batch)
+                #
+                if CG_mask:
+                    m_out = ImageRecon(A_new, b_new, x0, mask = mask, maxiter=CG_maxiter, \
+                                        tol=CG_tol, atol=CG_atol)
+                else:
+                    m_out = ImageRecon(A_new, b_new, x0, maxiter=CG_maxiter, \
+                                        tol=CG_tol, atol=CG_atol)
+                m_est = mask*m_out[-1]
+                xp.save(spath + r"/m_intmd.npy", m_est)
+                DC_store.append(eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
+                xp.save(spath + r"/DC_store.npy", DC_store)
+        #
+        m_est_rmse = mtc.evalPE(m_est, m_GT, mask)
+        m_est_ssim = mtc.evalSSIM(m_est, m_GT, mask=mask)
+        m_loss_store.append([m_est_rmse, m_est_ssim])
+        xp.save(spath + r"/m_loss_store.npy", m_loss_store)
+        print("NRMSE: {:.2f} %".format(m_est_rmse))
+        print("SSIM: {:.2f} %".format(m_est_ssim))
+        t3 = time()
+        print("Time elapsed for iter {}: {}sec".format(str(i+1), str(t3 - t2)))
+        # ----------------------------------------------------------------------
+        i += 1
+    print("Total Time elapsed: {} sec".format(time() - t1))
+    return m_est, m_loss_store, Mtraj_store, m_cnn_store
+
+
+def JointEst_SlidingWindow(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
+    x0, s_corrupted, C, U_list, dscale, res, spath, m_GT, R_pad, skull_mask = fixed_vars
+    U_Step1, U_Step2 = U_list
+    m_est, Mtraj_est = init_est
+    m_cnn_store, Mtraj_store, m_loss_store, DC_store = stores
+    m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol = JE_params
+    cnn_flag, JE_flag, trans_axes, pads, wpath = CNN_params
+    grad_flag = 0
+    filter_window = 19
+    i = 0
+    t1 = time()
+    while m_est_rmse >= rmse_tol and m_est_ssim <= ssim_tol and i < max_loops and not grad_flag:
+        t2 = time()
+        print("-----------------------------------------------------------")
+        print("Joint Optimization iter:{}".format(i+1))
+        # ----------------------------------------------------------------------
+        # Run CNN
+        if not JE_flag: #Magnitude only
+            m_est = UNet_Mag(m_est, trans_axes, pads, wpath, mask, cnn)
+            # m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
+            # gc.collect() #force garbage collection
+        else:
+            if cnn_flag:
+                m_est = UNet_ReIm(m_est, trans_axes, pads, wpath, mask, cnn)
+                # gc.collect() #force garbage collection
+            # ----------------------------------------------------------------------
+            # Motion Estimation step
+            if JE_flag:
+                Mtraj_est, Mtraj_loss, Mtraj_grad = MotionEst(Mtraj_est, m_est*skull_mask, C, U_Step1, \
+                                                                dscale, res, s_corrupted, \
+                                                                R_pad = R_pad, \
+                                                                maxiter=ME_maxiter, \
+                                                                ls_maxiter = LS_maxiter, \
+                                                                continuity = continuity)
+                Mtraj_loss_out = xp.tile(xp.array(Mtraj_loss)[:,None], (1,6))
+                # Mtraj_grad_out = xp.array(Mtraj_grad)
+                # Mtraj_store.append((Mtraj_est, Mtraj_loss_out, Mtraj_grad_out))
+                Mtraj_store.append((Mtraj_est, Mtraj_loss_out))
+                xp.save(spath + r"/Mtraj_store.npy", Mtraj_store)
+                if i>=filter_window+1:
+                    grad_flag = grad_condition(Mtraj_store, grad_tol, filter_window)
+                # ----------------------------------------------------------------------
+                # Image Recovery step
+                A_new = partial(eop._EH_E, C=C, U=U, Mtraj=Mtraj_est, \
+                                res=res, lamda=0, batch=batch)
+                b_new = eop.Encode_Adj(s_corrupted, C, U_Step2, Mtraj_est, res, batch=batch)
                 #
                 if CG_mask:
                     m_out = ImageRecon(A_new, b_new, x0, mask = mask, maxiter=CG_maxiter, \
