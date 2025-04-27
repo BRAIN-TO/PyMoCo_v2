@@ -108,6 +108,12 @@ def rescale_sym(x, max):
 def unscale_sym(x, max):
     return x*(2*max) - max
 
+def complex2channels(m_in):
+	return xp.concatenate((xp.real(m_in[..., None]), xp.imag(m_in[..., None])), axis = 3)
+
+def channels2complex(m_in):
+	return xp.squeeze(m_in[..., 0] + 1j*m_in[..., 1])
+
 def UNet_Mag(m_est, trans_axes, pads, wpath_severe, mask, cnn): #Magnitude Only
     #Update: June 6, 2024
     m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
@@ -120,13 +126,26 @@ def UNet_Mag(m_est, trans_axes, pads, wpath_severe, mask, cnn): #Magnitude Only
     m_est = m_est_cnn
     return m_est
 
-def UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn):
+def UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn): #Individual UNets for Re and Im
     m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
     m_cnn_in = rotate(m_cnn_in_init, angle=trans_axes[3], axes=(0,1))
     #
     m_cnn_out_real = cnn.main(xp.real(m_cnn_in), pads, wpath_severe + r'/real')
     m_cnn_out_imag = cnn.main(xp.imag(m_cnn_in), pads, wpath_severe + r'/imag')
     m_cnn_out = m_cnn_out_real + 1j*m_cnn_out_imag
+    #
+    m_est_cnn_init = rotate(m_cnn_out, angle=-trans_axes[3], axes=(0,1))
+    m_est_cnn = xp.transpose(m_est_cnn_init, axes=trans_axes[:3])*mask
+    m_est = m_est_cnn
+    return m_est
+
+def UNet_Complex(m_est, trans_axes, pads, wpath_severe, mask, cnn): #complex-valued UNet
+    #Update: June 6, 2024
+    m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
+    m_cnn_in = rotate(m_cnn_in_init, angle=trans_axes[3], axes=(0,1))
+    m_cnn_in = complex2channels(m_cnn_in)
+    m_cnn_out_complex = cnn.main(m_cnn_in, pads, wpath_severe + r'/complex_weighted', complex_flag = 1)
+    m_cnn_out = channels2complex(m_cnn_out_complex)
     #
     m_est_cnn_init = rotate(m_cnn_out, angle=-trans_axes[3], axes=(0,1))
     m_est_cnn = xp.transpose(m_est_cnn_init, axes=trans_axes[:3])*mask
@@ -220,7 +239,6 @@ def eval_TotalDC(Mtraj_est, fixed_vars, JE_params):
     DC = _f(Mtraj_est, m_est=m_est, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
     return DC
 
-
 def eval_TotalDC_SlidingWindow(Mtraj_est, fixed_vars, JE_params):
     x0, s_corrupted, C, U_list, _, res, _, _, R_pad, _ = fixed_vars
     U_Step1, U_Step2 = U_list
@@ -276,19 +294,12 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
         print("Joint Optimization iter:{}".format(i+1))
         # ----------------------------------------------------------------------
         # Update L2-norm of data consistency
-        if i == 0:
-            f_val = thresh['severe'] #initialize st use UNet_severe
-        else:
-            f_val = xp.mean(xp.array(Mtraj_loss))
         # Run CNN
         if not JE_flag: #Magnitude only
             m_est = UNet_Mag(m_est, trans_axes, pads, wpath_severe, mask, cnn)
-            # m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
-            # gc.collect() #force garbage collection
         else:
             if cnn_flag:
                 m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
-                # gc.collect() #force garbage collection
             # ----------------------------------------------------------------------
             # Motion Estimation step
             if JE_flag:
