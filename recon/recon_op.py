@@ -17,8 +17,6 @@ import motion.motion_sim as msi
 from scipy.ndimage import rotate
 import scipy.signal as ss
 
-import gc
-
 #%%-----------------------------------------------------------------------------
 #----------------------------------IMAGE MASK-----------------------------------
 #%%-----------------------------------------------------------------------------
@@ -33,10 +31,6 @@ def getMask(C, threshold = 1e-5):
 #%%-----------------------------------------------------------------------------
 #-----------------------------IMAGE RECONSTRUCTION------------------------------
 #%%-----------------------------------------------------------------------------
-'''
-***TEMPORARY - running into memory issues with directly calling jax.scipy.sparse.linalg***
-Currently just copying jax.scipy.sparse.linalg.cg script below
-'''
 
 def ImageRecon(A, b, x0, mask=None, maxiter=3, tol=1e-5, atol=0.0):
     """
@@ -299,7 +293,8 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
             m_est = UNet_Mag(m_est, trans_axes, pads, wpath_severe, mask, cnn)
         else:
             if cnn_flag:
-                m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
+                # m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
+                m_est = UNet_Complex(m_est, trans_axes, pads, wpath_severe, mask, cnn)
             # ----------------------------------------------------------------------
             # Motion Estimation step
             if JE_flag:
@@ -310,8 +305,6 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
                                                                 ls_maxiter = LS_maxiter, \
                                                                 continuity = continuity)
                 Mtraj_loss_out = xp.tile(xp.array(Mtraj_loss)[:,None], (1,6))
-                # Mtraj_grad_out = xp.array(Mtraj_grad)
-                # Mtraj_store.append((Mtraj_est, Mtraj_loss_out, Mtraj_grad_out))
                 Mtraj_store.append((Mtraj_est, Mtraj_loss_out))
                 xp.save(spath + r"/Mtraj_store.npy", Mtraj_store)
                 if i>=filter_window+1:
