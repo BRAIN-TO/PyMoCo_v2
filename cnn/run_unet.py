@@ -1,5 +1,5 @@
-# import numpy as np
-import jax.numpy as xp
+import numpy as xp
+# import jax.numpy as xp
 import scipy.io
 import math
 import glob
@@ -95,9 +95,9 @@ def main(m_in, pads, weights_path, complex_flag = 0):
 	if complex_flag: #UPDATE April 2025, patch for complex-valued UNet; need to rewrite more efficiently
 		test_current_re, test_after_re, test_before_re, flag1_re, flag2_re = _preprocess(m_in[..., 0] / scale, pads, shape_val)
 		test_current_im, test_after_im, test_before_im, flag1_im, flag2_im = _preprocess(m_in[..., 1] / scale, pads, shape_val)
-		test_current = xp.concatenate((test_current_re[..., None], test_current_im[..., None]), axis = 3)
-		test_after = xp.concatenate((test_after_re[..., None], test_after_im[..., None]), axis = 3)
-		test_before = xp.concatenate((test_before_re[..., None], test_before_im[..., None]), axis = 3)
+		test_current = xp.concatenate((test_current_re, test_current_im), axis = 3)
+		test_after = xp.concatenate((test_after_re, test_after_im), axis = 3)
+		test_before = xp.concatenate((test_before_re, test_before_im), axis = 3)
 	else:
 		test_current, test_after, test_before, flag1, flag2 = _preprocess(m_in / scale, pads, shape_val)
 	#---------------------------------------------------------------------------
@@ -121,3 +121,4 @@ def main(m_in, pads, weights_path, complex_flag = 0):
 	print('Inference Completed')
 	print('---------------------------------')
 	return m_corrected
+
