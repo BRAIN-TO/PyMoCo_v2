@@ -323,7 +323,9 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
                                         tol=CG_tol, atol=CG_atol)
                 m_est = mask*m_out[-1]
                 xp.save(spath + r"/m_intmd.npy", m_est)
-                DC_store.append(eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
+                DC_update = _f(Mtraj_est, m_est=m_est, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
+                DC_store.append(DC_update)
+                # DC_store.append(eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
                 xp.save(spath + r"/DC_store.npy", DC_store)
         #
         m_est_rmse = mtc.evalPE(m_est, m_GT, mask)
