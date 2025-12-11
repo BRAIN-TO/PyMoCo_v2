@@ -6,21 +6,31 @@ import matplotlib as mpl
 mpl.rcParams['axes.spines.right'] = False
 mpl.rcParams['axes.spines.top'] = False
 
+from scipy.ndimage import rotate
 
-def plot_views(img, vmax = 1.0):
+def plot_views(img, vmax = 1.0, rot_axes = (0,0,0), shift_axes=(0,0,0), spath=None):
     if vmax == "auto": #if auto, set as max val of volume
         vmax = abs(img.flatten().detach().cpu()).max()
     #
     fig, axes = plt.subplots(1,3)
     for i, ax in enumerate(axes):
         if i==0:
-            ax.imshow(img[img.shape[0]//2,:,:], cmap = "gray", vmax = vmax)
+            img_sag = img[img.shape[0]//2+shift_axes[0],:,:]
+            img_sag = rotate(img_sag, angle=rot_axes[0])
+            ax.imshow(img_sag, cmap = "gray", vmax = vmax)
         if i==1:
-            ax.imshow(img[:,img.shape[1]//2,:], cmap = "gray", vmax = vmax)
+            img_cor = img[:,img.shape[1]//2+shift_axes[1],:]
+            img_cor = rotate(img_cor, angle=rot_axes[1])
+            ax.imshow(img_cor, cmap = "gray", vmax = vmax)
         if i==2:
-            ax.imshow(img[:,:,img.shape[2]//2], cmap = "gray", vmax = vmax)
+            img_ax = img[:,:,img.shape[2]//2+shift_axes[2]]
+            img_ax = rotate(img_ax, angle=rot_axes[2])
+            ax.imshow(img_ax, cmap = "gray", vmax = vmax)
         #
-    plt.show()
+    if spath != None:
+        plt.savefig(spath)
+    else:
+        plt.show()
 
 def plot_Mtraj(Mtraj_GT, Mtraj, img_dims, rescale = 0):
     Nx, Ny, Nz = img_dims
