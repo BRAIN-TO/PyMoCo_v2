@@ -10,14 +10,12 @@ from jax.scipy.optimize import minimize
 from time import time
 from functools import partial
 
-from optimize.minimize import minimize as minimize_local # only for integrated loss function
 import encode.encode_op as eop
 import utils.metrics as mtc
+import motion.motion_sim as msi
 
 from scipy.ndimage import rotate
 import scipy.signal as ss
-
-import gc
 
 #%%-----------------------------------------------------------------------------
 #----------------------------------IMAGE MASK-----------------------------------
@@ -33,10 +31,6 @@ def getMask(C, threshold = 1e-5):
 #%%-----------------------------------------------------------------------------
 #-----------------------------IMAGE RECONSTRUCTION------------------------------
 #%%-----------------------------------------------------------------------------
-'''
-***TEMPORARY - running into memory issues with directly calling jax.scipy.sparse.linalg***
-Currently just copying jax.scipy.sparse.linalg.cg script below
-'''
 
 def ImageRecon(A, b, x0, mask=None, maxiter=3, tol=1e-5, atol=0.0):
     """
@@ -97,71 +91,6 @@ def ImageRecon(A, b, x0, mask=None, maxiter=3, tol=1e-5, atol=0.0):
 
 
 #%%-----------------------------------------------------------------------------
-#-------------------------------MOTION ESTIMATION-------------------------------
-#----------------------------FULL EVAL COST FUNCTION----------------------------
-#%%-----------------------------------------------------------------------------
-
-'''
-def _f(Mtraj_est_init, m_est=None, C=None, res=None, U=None, R_pad=None, s_corrupted=None):
-    Mtraj_est = Mtraj_est_init.reshape(16,6)
-    s_temp = eop.Encode(m_est, C, U, Mtraj_est, res, R_pad)
-    DC = s_temp.flatten() - s_corrupted.flatten()
-    return xp.abs(xp.dot(xp.conjugate(DC), DC)) #L2-norm
-
-import scipy
-def _min(Mtraj_est, m_est, C, res, U, R_pad, s_corrupted):
-    maxiter = 1
-    opts = {'maxiter':maxiter} # max number of iterations
-    opt_out = scipy.optimize.minimize(fun=_f, x0=Mtraj_est, \
-                                        args=(m_est, C, res, U, R_pad, s_corrupted), \
-                                        method='bfgs', options = opts)
-    Mtraj_update_n = opt_out.x
-    f_val = opt_out.fun
-    g_val = opt_out.jac
-    return Mtraj_update_n, f_val, g_val
-'''
-
-'''
-def _f_intra(Mtraj_est_n, m_est=None, C=None, res=None, U_shot=None, R_pad=None, s_corrupted=None):
-    #Data consistency for a given shot
-    n_shots = len(U_shot)
-    s_n = eop.Encode(m_est, C, U_shot, Mtraj_est_n.reshape(n_shots, 6), res, R_pad)
-    #
-    U_shot_full = xp.zeros(s_corrupted.shape)
-    for i in range(len(U_shot)):
-        U_shot_full += eop._gen_U_n(U_shot[i], m_est.shape)
-    #
-    DC = s_n.flatten() - (U_shot_full*s_corrupted).flatten()
-    return xp.abs(xp.dot(xp.conjugate(DC), DC)) #L2-norm
-'''
-
-'''
-import scipy
-
-def _f_intra(Mtraj_est_n, m_est=None, C=None, res=None, U_shot=None, R_pad=None, s_corrupted=None):
-    #Data consistency for a given shot
-    n_shots = len(U_shot)
-    s_n = eop.Encode(m_est, C, U_shot, Mtraj_est_n.reshape(n_shots, 6), res, R_pad)
-    #
-    U_shot_full = xp.zeros(s_corrupted.shape)
-    for i in range(len(U_shot)):
-        U_shot_full += eop._gen_U_n(U_shot[i], m_est.shape)
-    #
-    DC = s_n.flatten() - (U_shot_full*s_corrupted).flatten()
-    return xp.abs(xp.dot(xp.conjugate(DC), DC)) #L2-norm
-
-def _min_scipy(Mtraj_est_n, m_est, C, res, U_n, R_pad, s_corrupted, options):
-    #Minimizing data consistency wrt motion parameters for given shot
-    opt_out = scipy.optimize.minimize(_f_n, Mtraj_est_n, \
-                        args=(m_est, C, res, U_n, R_pad, s_corrupted), \
-                        method='bfgs', options = options)
-    Mtraj_update_n = opt_out.x
-    f_val = opt_out.fun
-    g_val = opt_out.jac
-    return Mtraj_update_n, f_val, g_val
-'''
-
-#%%-----------------------------------------------------------------------------
 #--------------------------------------UNET-------------------------------------
 #%%-----------------------------------------------------------------------------
 
@@ -172,6 +101,12 @@ def rescale_sym(x, max):
 
 def unscale_sym(x, max):
     return x*(2*max) - max
+
+def complex2channels(m_in):
+	return xp.concatenate((xp.real(m_in[..., None]), xp.imag(m_in[..., None])), axis = 3)
+
+def channels2complex(m_in):
+	return xp.squeeze(m_in[..., 0] + 1j*m_in[..., 1])
 
 def UNet_Mag(m_est, trans_axes, pads, wpath_severe, mask, cnn): #Magnitude Only
     #Update: June 6, 2024
@@ -185,24 +120,7 @@ def UNet_Mag(m_est, trans_axes, pads, wpath_severe, mask, cnn): #Magnitude Only
     m_est = m_est_cnn
     return m_est
 
-# def UNet_MagPhase(m_est, trans_axes, pads, wpath_severe, mask, cnn): #Combined Magnitude and Phase Unet
-#     #Update: June 6, 2024
-#     m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
-#     m_cnn_in = rotate(m_cnn_in_init, angle=trans_axes[3], axes=(0,1))
-#     # m_cnn_out = cnn.main(xp.abs(m_cnn_in), pads, wpath_severe) #MAGNITUDE UNET
-#     m_cnn_out_mag = cnn.main(xp.abs(m_cnn_in), pads, wpath_severe + r'/magnitude') #MAGNITUDE UNET
-#     m_cnn_out_phase = cnn.main(xp.angle(m_cnn_in), pads, wpath_severe + r'/phase') #PHASE UNET
-#     m_cnn_out_phase_unscaled = unscale_sym(m_cnn_out_phase, xp.pi)
-#     m_cnn_out = m_cnn_out_mag*xp.exp(1j*m_cnn_out_phase_unscaled)
-#     #
-#     m_est_cnn_init = rotate(m_cnn_out, angle=-trans_axes[3], axes=(0,1))
-#     m_est_cnn = xp.transpose(m_est_cnn_init, axes=trans_axes[:3])*mask
-#     # m_est = m_est_cnn*xp.exp(1j*xp.angle(m_est)) #recombine with phase of intermediate input image
-#     m_est = m_est_cnn
-#     # xp.save(spath + r"/m_cnn_store.npy", m_cnn_store)
-#     return m_est
-
-def UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn):
+def UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn): #Individual UNets for Re and Im
     m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
     m_cnn_in = rotate(m_cnn_in_init, angle=trans_axes[3], axes=(0,1))
     #
@@ -215,33 +133,18 @@ def UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn):
     m_est = m_est_cnn
     return m_est
 
-# def UNet_ReIm_Sequential(m_est, trans_axes, pads, wpath_severe, mask):
-#     m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
-#     m_cnn_in = rotate(m_cnn_in_init, angle=trans_axes[3], axes=(0,1))
-#     print('Current Loss value: {}'.format(f_val))
-#     if f_val >= thresh['severe']:
-#         print("UNet - Severe")
-#         m_cnn_out_real = cnn.main(xp.real(m_cnn_in), pads, wpath_severe + r'/real')
-#         m_cnn_out_imag = cnn.main(xp.imag(m_cnn_in), pads, wpath_severe + r'/imag')
-#         m_cnn_out = m_cnn_out_real + 1j*m_cnn_out_imag
-#     elif f_val >= thresh['moderate'] and f_val < thresh['severe']:
-#         print("UNet - Moderate")
-#         m_cnn_out_real = cnn.main(xp.real(m_cnn_in), pads, wpath_moderate + r'/real')
-#         m_cnn_out_imag = cnn.main(xp.imag(m_cnn_in), pads, wpath_moderate + r'/imag')
-#         m_cnn_out = m_cnn_out_real + 1j*m_cnn_out_imag
-#     elif f_val >= 0 and f_val < thresh['moderate']:
-#         print("UNet - Mild")
-#         m_cnn_out_real = cnn.main(xp.real(m_cnn_in), pads, wpath_mild + r'/real')
-#         m_cnn_out_imag = cnn.main(xp.imag(m_cnn_in), pads, wpath_mild + r'/imag')
-#         m_cnn_out = m_cnn_out_real + 1j*m_cnn_out_imag
-#     elif f_val < 0: #if diverging
-#         print("No UNet")
-#         m_cnn_out = m_cnn_in
-#     m_est_cnn_init = rotate(m_cnn_out, angle=-trans_axes[3], axes=(0,1))
-#     m_est_cnn = xp.transpose(m_est_cnn_init, axes=trans_axes[:3])*mask
-#     m_cnn_store.append(m_est_cnn)
-#     m_est = m_est_cnn
-#     return m_est
+def UNet_Complex(m_est, trans_axes, pads, wpath_severe, mask, cnn): #complex-valued UNet
+    #Update: June 6, 2024
+    m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
+    m_cnn_in = rotate(m_cnn_in_init, angle=trans_axes[3], axes=(0,1))
+    m_cnn_in = complex2channels(m_cnn_in)
+    m_cnn_out_complex = cnn.main(m_cnn_in, pads, wpath_severe + r'/complex_weighted', complex_flag = 1)
+    m_cnn_out = channels2complex(m_cnn_out_complex)
+    #
+    m_est_cnn_init = rotate(m_cnn_out, angle=-trans_axes[3], axes=(0,1))
+    m_est_cnn = xp.transpose(m_est_cnn_init, axes=trans_axes[:3])*mask
+    m_est = m_est_cnn
+    return m_est
 
 #%%-----------------------------------------------------------------------------
 #-------------------------------MOTION ESTIMATION-------------------------------
@@ -285,7 +188,7 @@ def MotionEst(Mtraj_est, m_est, C, U, dscale, res, s_corrupted, R_pad = (0,0,0),
     for n in range(nshots):
         print("Shot: {}".format(str(n+1)))
         t1 = time()
-        U_n = eop._gen_U_n(U[n], m_est.shape)
+        U_n = msi._gen_U_n(U[n], m_est.shape)
         if continuity and n>0: #enforce continuity for subsequent shots
                 Mtraj_est_n = Mtraj_out[n-1,:] #seed with updated estimate for previous shot
         else:
@@ -330,6 +233,24 @@ def eval_TotalDC(Mtraj_est, fixed_vars, JE_params):
     DC = _f(Mtraj_est, m_est=m_est, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
     return DC
 
+def eval_TotalDC_SlidingWindow(Mtraj_est, fixed_vars, JE_params):
+    x0, s_corrupted, C, U_list, _, res, _, _, R_pad, _ = fixed_vars
+    U_Step1, U_Step2 = U_list
+    _, _, _, _, _, _, _, CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, _, _ = JE_params
+    #
+    A_new = partial(eop._EH_E, C=C, U=U_Step2, Mtraj=Mtraj_est, res=res, lamda=0, batch=batch)
+    b_new = eop.Encode_Adj(s_corrupted, C, U_Step2, Mtraj_est, res, batch=batch)
+    #
+    if CG_mask:
+        m_out = ImageRecon(A_new, b_new, x0, mask = mask, maxiter=CG_maxiter, \
+                            tol=CG_tol, atol=CG_atol)
+    else:
+        m_out = ImageRecon(A_new, b_new, x0, maxiter=CG_maxiter, \
+                            tol=CG_tol, atol=CG_atol)
+    #
+    m_est = mask*m_out[-1]
+    DC = _f(Mtraj_est, m_est=m_est, C=C, res=res, U=U_Step2, R_pad=R_pad, s_corrupted=s_corrupted)
+    return DC
 
 #%% ----------------------------------------------------------------------------
 # -------------------------------JOINT ESTIMATION-------------------------------
@@ -367,19 +288,13 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
         print("Joint Optimization iter:{}".format(i+1))
         # ----------------------------------------------------------------------
         # Update L2-norm of data consistency
-        if i == 0:
-            f_val = thresh['severe'] #initialize st use UNet_severe
-        else:
-            f_val = xp.mean(xp.array(Mtraj_loss))
         # Run CNN
         if not JE_flag: #Magnitude only
             m_est = UNet_Mag(m_est, trans_axes, pads, wpath_severe, mask, cnn)
-            # m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
-            # gc.collect() #force garbage collection
         else:
             if cnn_flag:
-                m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
-                # gc.collect() #force garbage collection
+                # m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
+                m_est = UNet_Complex(m_est, trans_axes, pads, wpath_severe, mask, cnn)
             # ----------------------------------------------------------------------
             # Motion Estimation step
             if JE_flag:
@@ -390,8 +305,6 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
                                                                 ls_maxiter = LS_maxiter, \
                                                                 continuity = continuity)
                 Mtraj_loss_out = xp.tile(xp.array(Mtraj_loss)[:,None], (1,6))
-                # Mtraj_grad_out = xp.array(Mtraj_grad)
-                # Mtraj_store.append((Mtraj_est, Mtraj_loss_out, Mtraj_grad_out))
                 Mtraj_store.append((Mtraj_est, Mtraj_loss_out))
                 xp.save(spath + r"/Mtraj_store.npy", Mtraj_store)
                 if i>=filter_window+1:
@@ -410,7 +323,9 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
                                         tol=CG_tol, atol=CG_atol)
                 m_est = mask*m_out[-1]
                 xp.save(spath + r"/m_intmd.npy", m_est)
-                DC_store.append(eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
+                DC_update = _f(Mtraj_est, m_est=m_est, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
+                DC_store.append(DC_update)
+                # DC_store.append(eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
                 xp.save(spath + r"/DC_store.npy", DC_store)
         #
         m_est_rmse = mtc.evalPE(m_est, m_GT, mask)
@@ -427,62 +342,73 @@ def JointEst(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
     return m_est, m_loss_store, Mtraj_store, m_cnn_store
 
 
-# def SAMER(init_est, fixed_vars, stores, JE_params):
-#     x0, s_corrupted, C, U, dscale, mask, res, spath, m_GT, R_pad = fixed_vars
-#     m_est, Mtraj_est = init_est
-#     m_cnn_store, Mtraj_store, m_loss_store = stores
-#     m_est_rmse, rmse_tol, max_loops, ME_maxiter, LS_maxiter, CG_maxiter, CG_tol, CG_atol, batch, mask = JE_params
-#     i = 0
-#     t1 = time()
-#     while m_est_rmse >= rmse_tol and i <= max_loops:
-#         t2 = time()
-#         print("-----------------------------------------------------------")
-#         print("Joint Optimization iter:{}".format(i+1))
-#         # Motion Estimation step
-#         Mtraj_est, Mtraj_loss, Mtraj_grad = MotionEst(Mtraj_est, m_est, C, U, \
-#                                                       dscale, res, s_corrupted, \
-#                                                       R_pad = R_pad, \
-#                                                       maxiter=ME_maxiter, \
-#                                                       ls_maxiter = LS_maxiter)
-#         Mtraj_store.append((Mtraj_est, Mtraj_loss, Mtraj_grad))
-#         xp.save(spath + r"/Mtraj_store_SAMER.npy", Mtraj_store)
-#         t3 = time()
-#         print("Time elapsed for iter {}: {}sec".format(str(i+1), str(t3 - t2)))
-#         # ----------------------------------------------------------------------
-#         i += 1
-#     print("Total Time elapsed: {} sec".format(time() - t1))
-#     return m_est, m_loss_store, Mtraj_store, m_cnn_store
-
-
-
-
-'''
-#TEMP CODE, April 24 2024
-#WANT TO SEE IF I CAN APPLY THE MAGNITUDE-ONLY UNET TO THE REAL AND IMAGINARY COMPONENTS OF THE COMPLEX DATA
-
-m_cnn_in_init = xp.transpose(m_est, axes=trans_axes[:3])
-m_cnn_in = rotate(m_cnn_in_init, angle=trans_axes[3], axes=(0,1))
-
-#TRY APPLING THE MAGNITUDE UNET ON THE REAL AND IMAGINARY COMPONENTS OF THE COMPLEX IMAGE
-m_cnn_out_re = cnn.main(xp.real(m_cnn_in), pads, wpath_severe + r'/magnitude') #MAGNITUDE UNET
-m_cnn_out_im = cnn.main(xp.imag(m_cnn_in), pads, wpath_severe + r'/magnitude') #MAGNITUDE UNET
-
-m_cnn_out = m_cnn_out_re + 1j*m_cnn_out_im
-m_est_cnn_init = rotate(m_cnn_out, angle=-trans_axes[3], axes=(0,1))
-m_est_cnn = xp.transpose(m_est_cnn_init, axes=trans_axes[:3])*mask
-
-m_cnn_store.append(m_est_cnn)
-m_est = m_est_cnn
-
-import matplotlib.pyplot as plt
-
-img_plot = abs(xp.imag(m_corrupted[m_est.shape[0]//2,:,:]))
-img_plot = abs(xp.imag(m_corrupted[:,m_est.shape[1]//2,:]))
-img_plot = abs(xp.imag(m_corrupted[:,:,m_est.shape[2]//2]))
-
-plt.figure()
-plt.imshow(img_plot, cmap = "gray")
-plt.show()
-
-
-'''
+def JointEst_SlidingWindow(init_est, fixed_vars, stores, cnn, CNN_params, JE_params):
+    x0, s_corrupted, C, U_list, dscale, res, spath, m_GT, R_pad, skull_mask = fixed_vars
+    U_Step1, U_Step2 = U_list
+    m_est, Mtraj_est = init_est
+    m_cnn_store, Mtraj_store, m_loss_store, DC_store = stores
+    m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol = JE_params
+    cnn_flag, JE_flag, trans_axes, pads, wpath = CNN_params
+    grad_flag = 0
+    filter_window = 19
+    i = 0
+    t1 = time()
+    while m_est_rmse >= rmse_tol and m_est_ssim <= ssim_tol and i < max_loops and not grad_flag:
+        t2 = time()
+        print("-----------------------------------------------------------")
+        print("Joint Optimization iter:{}".format(i+1))
+        # ----------------------------------------------------------------------
+        # Run CNN
+        if not JE_flag: #Magnitude only
+            m_est = UNet_Mag(m_est, trans_axes, pads, wpath, mask, cnn)
+            # m_est = UNet_ReIm(m_est, trans_axes, pads, wpath_severe, mask, cnn)
+            # gc.collect() #force garbage collection
+        else:
+            if cnn_flag:
+                m_est = UNet_ReIm(m_est, trans_axes, pads, wpath, mask, cnn)
+                # gc.collect() #force garbage collection
+            # ----------------------------------------------------------------------
+            # Motion Estimation step
+            if JE_flag:
+                Mtraj_est, Mtraj_loss, Mtraj_grad = MotionEst(Mtraj_est, m_est*skull_mask, C, U_Step1, \
+                                                                dscale, res, s_corrupted, \
+                                                                R_pad = R_pad, \
+                                                                maxiter=ME_maxiter, \
+                                                                ls_maxiter = LS_maxiter, \
+                                                                continuity = continuity)
+                Mtraj_loss_out = xp.tile(xp.array(Mtraj_loss)[:,None], (1,6))
+                # Mtraj_grad_out = xp.array(Mtraj_grad)
+                # Mtraj_store.append((Mtraj_est, Mtraj_loss_out, Mtraj_grad_out))
+                Mtraj_store.append((Mtraj_est, Mtraj_loss_out))
+                xp.save(spath + r"/Mtraj_store.npy", Mtraj_store)
+                if i>=filter_window+1:
+                    grad_flag = grad_condition(Mtraj_store, grad_tol, filter_window)
+                # ----------------------------------------------------------------------
+                # Image Recovery step
+                A_new = partial(eop._EH_E, C=C, U=U_Step2, Mtraj=Mtraj_est, \
+                                res=res, lamda=0, batch=batch)
+                b_new = eop.Encode_Adj(s_corrupted, C, U_Step2, Mtraj_est, res, batch=batch)
+                #
+                if CG_mask:
+                    m_out = ImageRecon(A_new, b_new, x0, mask = mask, maxiter=CG_maxiter, \
+                                        tol=CG_tol, atol=CG_atol)
+                else:
+                    m_out = ImageRecon(A_new, b_new, x0, maxiter=CG_maxiter, \
+                                        tol=CG_tol, atol=CG_atol)
+                m_est = mask*m_out[-1]
+                xp.save(spath + r"/m_intmd.npy", m_est)
+                DC_store.append(eval_TotalDC_SlidingWindow(Mtraj_est, fixed_vars, JE_params))
+                xp.save(spath + r"/DC_store.npy", DC_store)
+        #
+        m_est_rmse = mtc.evalPE(m_est, m_GT, mask)
+        m_est_ssim = mtc.evalSSIM(m_est, m_GT, mask=mask)
+        m_loss_store.append([m_est_rmse, m_est_ssim])
+        xp.save(spath + r"/m_loss_store.npy", m_loss_store)
+        print("NRMSE: {:.2f} %".format(m_est_rmse))
+        print("SSIM: {:.2f} %".format(m_est_ssim))
+        t3 = time()
+        print("Time elapsed for iter {}: {}sec".format(str(i+1), str(t3 - t2)))
+        # ----------------------------------------------------------------------
+        i += 1
+    print("Total Time elapsed: {} sec".format(time() - t1))
+    return m_est, m_loss_store, Mtraj_store, m_cnn_store

@@ -12,45 +12,43 @@ from functools import partial
 from itertools import zip_longest
 import numpy as np
 
-import motion.motion_sim as msi
-
 #%%-----------------------------------------------------------------------------
 #--------------------------------HELPER FUNCTIONS-------------------------------
 #%%-----------------------------------------------------------------------------
 
 def _farray(ishape, res, axis):
     '''Compute kspace coordinates along axis'''
-    return xp.fft.fftshift(xp.fft.fftfreq(ishape[axis], d = res[axis]))
+    return np.fft.fftshift(np.fft.fftfreq(ishape[axis], d = res[axis]))
 
 def _fgrid(ishape, res):
     '''Compute grid of kspace coordinates'''
     fx_array = _farray(ishape, res, 0)
     fy_array = _farray(ishape, res, 1)
     fz_array = _farray(ishape, res, 2)
-    fx_grid, fy_grid, fz_grid = xp.meshgrid(fx_array, fy_array, fz_array, indexing = 'ij')
+    fx_grid, fy_grid, fz_grid = np.meshgrid(fx_array, fy_array, fz_array, indexing = 'ij')
     return fx_grid, fy_grid, fz_grid
 
 def _iarray(ishape, res, axis):
     '''Compute image-space coordinates along axis'''
-    return xp.arange(-ishape[axis]//2, ishape[axis]//2)*res[axis]
+    return np.arange(-ishape[axis]//2, ishape[axis]//2)*res[axis]
 
 def _igrid(ishape, res):
     '''Compute image-space coordinates'''
     x_array = _iarray(ishape, res, 0)
     y_array = _iarray(ishape, res, 1)
     z_array = _iarray(ishape, res, 2)
-    x_grid, y_grid, z_grid = xp.meshgrid(x_array, y_array, z_array, indexing = 'ij')
+    x_grid, y_grid, z_grid = np.meshgrid(x_array, y_array, z_array, indexing = 'ij')
     return x_grid, y_grid, z_grid
 
 def _fft(input, axes):
-    in_shift = xp.fft.ifftshift(input, axes = axes)
-    in_fft = xp.fft.fftn(in_shift, axes = axes, norm = "ortho")
-    return xp.fft.fftshift(in_fft, axes = axes)
+    in_shift = np.fft.ifftshift(input, axes = axes)
+    in_fft = np.fft.fftn(in_shift, axes = axes, norm = "ortho")
+    return np.fft.fftshift(in_fft, axes = axes)
 
 def _ifft(input, axes):
-    in_shift = xp.fft.ifftshift(input, axes = axes)
-    in_ifft = xp.fft.ifftn(in_shift, axes = axes, norm = "ortho")
-    return xp.fft.fftshift(in_ifft, axes = axes)
+    in_shift = np.fft.ifftshift(input, axes = axes)
+    in_ifft = np.fft.ifftn(in_shift, axes = axes, norm = "ortho")
+    return np.fft.fftshift(in_ifft, axes = axes)
 
 #%%-----------------------------------------------------------------------------
 #------------------------------TRANSLATION OPERATOR-----------------------------
@@ -59,7 +57,7 @@ def _ifft(input, axes):
 def _phaseRamp(D, fgrid, axis):
     '''Compute phase ramp for given axis'''
     phase = fgrid[axis] * D[axis]
-    return xp.exp(-2j*xp.pi*phase)
+    return np.exp(-2j*np.pi*phase)
 
 def _trans1D(D, fgrid, axis, input):
     '''Apply translation (phase ramp) for given axis'''
@@ -87,7 +85,7 @@ def Translate(input, D, res, mode='fwd'):
 #Helper functions for rotation
 def _pad(input, pad):
     '''Add symmetric padding to input'''
-    output = xp.pad(input, ((pad[0],pad[0]), (pad[1],pad[1]), (pad[2],pad[2])))
+    output = np.pad(input, ((pad[0],pad[0]), (pad[1],pad[1]), (pad[2],pad[2])))
     return output
 
 def _unpad_inds(pad):
@@ -108,15 +106,15 @@ def _unpad(input, pad):
     return output
 
 def _deg2rad(val): #convert to rad
-    return val * (xp.pi / 180)
+    return val * (np.pi / 180)
 
 def _phase_tan(R_i, fgrid_i, igrid_i):
-    phase = -xp.tan(_deg2rad(R_i/2)) * xp.multiply(fgrid_i, igrid_i)
-    return xp.exp(-2j*xp.pi*phase)
+    phase = -np.tan(_deg2rad(R_i/2)) * np.multiply(fgrid_i, igrid_i)
+    return np.exp(-2j*np.pi*phase)
 
 def _phase_sin(R_i, fgrid_i, igrid_i):
-    phase = xp.sin(_deg2rad(R_i)) * xp.multiply(fgrid_i, igrid_i)
-    return xp.exp(-2j*xp.pi*phase)
+    phase = np.sin(_deg2rad(R_i)) * np.multiply(fgrid_i, igrid_i)
+    return np.exp(-2j*np.pi*phase)
 
 def _shear_tan(R_i, fgrid_i, igrid_i, tan_axis, input):
     #Compute nonlinear phase ramp for shearing along given axis
@@ -164,6 +162,56 @@ def Rotate(input, R, res, pad, mode='fwd'):
 #%%-----------------------------------------------------------------------------
 #--------------------------------ENCODING MODEL---------------------------------
 #%%-----------------------------------------------------------------------------
+def _U_Array2List(U, m_shape):
+    U_list = []
+    for i in range(U.shape[0]):
+        RO_temp = np.arange(0, m_shape[0])
+        PE1_temp = np.where(U[i,0,:,0] == 1)[0]
+        PE2_temp = np.arange(0, m_shape[2])
+        U_list.append([RO_temp, PE1_temp, PE2_temp])
+    return U_list
+
+def _gen_U_n(U_vals, m_shape):
+    #Lazy evaluation of sampling pattern
+    U_RO = np.zeros(m_shape[0]); U_RO = U_RO.at[U_vals[0]].set(1) 
+    U_PE1 = np.zeros(m_shape[1]); U_PE1 = U_PE1.at[U_vals[1]].set(1)
+    U_PE2 = np.zeros(m_shape[2]); U_PE2 = U_PE2.at[U_vals[2]].set(1)    
+    return np.multiply.outer(U_RO, np.outer(U_PE1, U_PE2))
+
+def _U_subdivide(U, dscale):
+    #Subdivide U into finer temporal resolution
+    U_temp = []
+    for n in range(len(U)):
+        RO_temp = U[n][0]
+        PE2_temp = U[n][2]
+        PE1_temp = U[n][1]
+        for m in range(dscale):
+            ind1 = m*PE1_temp.shape[0]//dscale
+            ind2 = (m+1)*PE1_temp.shape[0]//dscale
+            if len(PE1_temp[ind1:ind2])==0: #if exceeded number of PE1 steps in the shot
+                pass
+            else:
+                U_temp.append([RO_temp, PE1_temp[ind1:ind2], PE2_temp])
+        #
+    return U_temp   
+
+def _U_combine(U, upscale):
+    U_temp = []
+    upscale_inds = np.arange(0,len(U), upscale)
+    for i, ind in enumerate(upscale_inds):
+        start = ind
+        if i == len(upscale_inds)-1:
+            end = len(U)
+        else:
+            end = ind+2
+        RO_temp = U[i][0]
+        PE2_temp = U[i][2]
+        PE1_temp = []
+        for j in range(start,end):
+            PE1_temp.append(U[j][1])
+        PE1_temp = np.asarray(PE1_temp).flatten()
+        U_temp.append([RO_temp, PE1_temp, PE2_temp])
+    return U_temp
 
 def _E_n(U_n, R_n, T_n, m=None, C=None, res=None, R_pad=None): #Apply forward encoding operator for single shot
     #Apply FWD encoding
@@ -176,28 +224,22 @@ def _E_n(U_n, R_n, T_n, m=None, C=None, res=None, R_pad=None): #Apply forward en
 
 def _EH_n(U_n, R_n, T_n, s=None, C=None, res=None, R_pad=None): #Apply inverse encoding operator for single shot
     #Apply INV
-    Us = xp.conj(U_n)*s
+    Us = np.conj(U_n)*s
     FUs = _ifft(Us, (1,2,3))
-    CFUs = xp.sum(xp.conj(C) * FUs, axis = 0)
+    CFUs = np.sum(np.conj(C) * FUs, axis = 0)
     TCFUs = Translate(CFUs, T_n, res, mode='inv')
     m_n = Rotate(TCFUs, R_n, res, R_pad, mode='inv')
     return m_n
 
-def _Omega(U_n, m):
-    #Retrieves subimage recon of given k-space shot
-    Fm = _fft(m, (0,1,2))
-    UFm = U_n * Fm
-    IFUFm = _ifft(UFm, (0,1,2))
-    return IFUFm
+# @partial(jit, static_argnums = (5,)) #R_pad is static argument due to explicit ref in pad / unpad
+# def _E_vmap(input, C, res, U_n, R_n, R_pad, T_n):
+#     fmap = vmap(_E_n, in_axes = (0, 0, 0, None, None, None, None), out_axes = 0)
+#     return fmap(U_n, R_n, T_n, input, C, res, R_pad)
 
-def _E_n_alt(U_n, R_n, T_n, m=None, C=None, res=None, R_pad=None): #Apply forward encoding operator for single shot
-    #Apply FWD encoding
-    Om = _Omega(U_n, m) #subimage recon of n-th k-space shot
-    ROm = Rotate(Om, R_n, res, R_pad)
-    TROm = Translate(ROm, T_n, res)
-    CTROm = C * TROm
-    s_n = _fft(CTROm, (1,2,3))
-    return s_n
+# @partial(jit, static_argnums = (5,)) #R_pad is static argument due to explicit ref in pad / unpad
+# def _EH_vmap(input, C, res, U_n, R_n, R_pad, T_n):
+#     fmap = vmap(_EH_n, in_axes = (0, 0, 0, None, None, None, None), out_axes = 0)
+#     return fmap(U_n, R_n, T_n, input, C, res, R_pad)
 
 # @partial(jit, static_argnums = (5,)) #R_pad is static argument due to explicit ref in pad / unpad
 def Encode(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
@@ -208,10 +250,19 @@ def Encode(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
     OUT: signal (s)
     '''
     nshots = len(U)
-    s_out = xp.zeros(C.shape, dtype = C.dtype)
+    #Vectorize U, R, T input for E
+    # U_vmap = np.array_split(U, len(U) // batch, axis = 0)
+    # R_vmap = np.array_split(Mtraj[:, 3:], Mtraj.shape[0] // batch, axis = 0)
+    # T_vmap = np.array_split(Mtraj[:, :3], Mtraj.shape[0] // batch, axis = 0)
+    # #Run vectorized E
+    # s_out = np.zeros(C.shape, dtype = C.dtype)
+    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
+    #     s_vmap = _E_vmap(input, C, res, U_n, R_n, R_pad, T_n)
+    #     s_out += np.sum(s_vmap, axis=0)
+    # #
+    s_out = np.zeros(C.shape, dtype = C.dtype)
     for n in range(nshots):
-        print("Shot {}".format(n+1), end='\r')
-        U_n = msi._gen_U_n(U[n], input.shape)
+        U_n = _gen_U_n(U[n], input.shape)
         s_out += _E_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
     return s_out
 
@@ -224,10 +275,19 @@ def Encode_Adj(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
     OUT: image (m)
     '''
     nshots = len(U)
-    m_out = xp.zeros(C.shape[1:], dtype = C.dtype)
+    # #Vectorize U, R, T input for EH
+    # U_vmap = np.array_split(U, U.shape[0] // batch, axis = 0)
+    # R_vmap = np.array_split(Mtraj[:, 3:], Mtraj.shape[0] // batch, axis = 0)
+    # T_vmap = np.array_split(Mtraj[:, :3], Mtraj.shape[0] // batch, axis = 0)
+    # #Run vectorized EH
+    # m_out = np.zeros(C.shape[1:], dtype = C.dtype)
+    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
+    #     m_vmap = _EH_vmap(input, C, res, U_n, R_n, R_pad, T_n)
+    #     m_out += np.sum(m_vmap, axis=0)
+    # #
+    m_out = np.zeros(C.shape[1:], dtype = C.dtype)
     for n in range(nshots):
-        print("Shot {}".format(n+1), end='\r')
-        U_n = msi._gen_U_n(U[n], input.shape[1:])
+        U_n = _gen_U_n(U[n], input.shape[1:])
         m_out += _EH_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
     return m_out
 
@@ -236,13 +296,30 @@ def Encode_Adj(input, C, U, Mtraj, res, R_pad = (0,0,0), batch = 1):
 def _EH_E(input, C=None, U=None, Mtraj=None, res=None, lamda = 0, R_pad = (0,0,0), batch = 1):
     '''Applying EHE, for use in recon.ImageRecon (CG SENSE)'''
     nshots = len(U)
-    s_out = xp.zeros(C.shape, dtype = C.dtype)
+    #Vectorize U, R, T input for E
+    # U_vmap = np.array_split(U, len(U) // batch, axis = 0)
+    # R_vmap = np.array_split(Mtraj[:, 3:], Mtraj.shape[0] // batch, axis = 0)
+    # T_vmap = np.array_split(Mtraj[:, :3], Mtraj.shape[0] // batch, axis = 0)
+    # #Run vectorized E
+    # s_out = np.zeros(C.shape, dtype = C.dtype)
+    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
+    #     s_vmap = _E_vmap(input, C, res, U_n, R_n, R_pad, T_n)
+    #     s_out += np.sum(s_vmap, axis=0)
+    # #
+    # #
+    s_out = np.zeros(C.shape, dtype = C.dtype)
     for n in range(nshots):
-        U_n = msi._gen_U_n(U[n], input.shape)
+        U_n = _gen_U_n(U[n], input.shape)
         s_out += _E_n(U_n, Mtraj[n,3:], Mtraj[n,:3], input, C, res, R_pad)
-    m_out = xp.zeros(C.shape[1:], dtype = C.dtype)
+    # #Run vectorized EH
+    # m_out = np.zeros(input.shape[1:], dtype = input.dtype)
+    # for (U_n, R_n, T_n) in zip(U_vmap, R_vmap, T_vmap):
+    #     m_vmap = _EH_vmap(s_out, C, res, U_n, R_n, R_pad, T_n)
+    #     m_out += np.sum(m_vmap, axis=0)
+    # #
+    m_out = np.zeros(C.shape[1:], dtype = C.dtype)
     for n in range(nshots):
-        U_n = msi._gen_U_n(U[n], s_out.shape[1:])
+        U_n = _gen_U_n(U[n], s_out.shape[1:])
         m_out += _EH_n(U_n, Mtraj[n,3:], Mtraj[n,:3], s_out, C, res, R_pad)
     #
-    return m_out + lamda * xp.ones(m_out.shape, dtype=m_out.dtype)
+    return m_out + lamda * np.ones(m_out.shape, dtype=m_out.dtype)
