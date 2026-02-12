@@ -14,6 +14,7 @@ import jax
 import jax.numpy as xp
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+print(f"Default backend: {jax.default_backend()}")
 
 import encode.encode_op as eop
 import recon.recon_op as rec
