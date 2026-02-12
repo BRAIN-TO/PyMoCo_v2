@@ -23,7 +23,7 @@ import motion.motion_sim as msi
 import utils.visualize as vis
 
 #-------------------------------------------------------------------------------
-def main(dpath, spath_root, mpath, gt_name, test_flag, case):
+def main(sub, dpath, flag, motion_lv):
     #---------------------------------------------------------------------------
     #-----------------------Image Acquisition Simulation------------------------
     #---------------------------------------------------------------------------
@@ -44,32 +44,29 @@ def main(dpath, spath_root, mpath, gt_name, test_flag, case):
     U = msi.make_samp(m_GT, Rs, TR_shot, order='interleaved', mode = 'list')
     #---------------------------------------------------------------------------
     mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
-    res = xp.array([1,1,1])
+    res = xp.array([1,1,1]) #spatial resolution
     #---------------------------------------
     #Set mask to identity for the simulation study
     cerebrum_mask = xp.ones(m_GT.shape)
     #---------------------------------------
     #Motion trajectory
-    R_pad = (10, 10, 10)
-    batch = 1
+    R_pad = (10, 10, 10) #spatial zero-padding to avoid wrapping during rotations
+    batch = 1 #grouping shots together during estimation; batch set to 1 due to memory limits
     specs_scale = [1, 1] #[r_scale, p_scale]
     #Generating discrete random motion trajectory
-    mild_specs = {'Tx':[0.1,0.1],'Ty':[0.2,0.15],'Tz':[0.2,0.15],\
-                'Rx':[0.2,0.15],'Ry':[0.1,0.1],'Rz':[0.1,0.1]} #[max_rate, prob]
-    moderate_specs = {'Tx':[0.2,0.1],'Ty':[0.4,0.2],'Tz':[0.4,0.2],\
+    mild_specs = {'Tx':[0.2,0.1],'Ty':[0.4,0.2],'Tz':[0.4,0.2],\
                 'Rx':[0.5,0.2],'Ry':[0.2,0.1],'Rz':[0.2,0.1]} #[max_rate, prob]
-    severe_specs1 = {'Tx':[0.4,0.15],'Ty':[0.9,0.3],'Tz':[0.9,0.3],\
+    moderate_specs = {'Tx':[0.4,0.15],'Ty':[0.9,0.3],'Tz':[0.9,0.3],\
                 'Rx':[1,0.3],'Ry':[0.5,0.15],'Rz':[0.5,0.15]} #[max_rate, prob]
-    severe_specs2 = {'Tx':[0.8,0.3],'Ty':[1.8,0.6],'Tz':[1.8,0.6],\
+    large_specs = {'Tx':[0.8,0.3],'Ty':[1.8,0.6],'Tz':[1.8,0.6],\
                 'Rx':[2,0.6],'Ry':[1.0,0.3],'Rz':[1.0,0.3]} #Double the max_rate and probability
-    severe_specs3 = {'Tx':[1.6,0.6],'Ty':[3.6,1.0],'Tz':[3.6,1.0],\
+    extreme_specs = {'Tx':[1.6,0.6],'Ty':[3.6,1.0],'Tz':[3.6,1.0],\
                 'Rx':[4,1.0],'Ry':[2.0,0.6],'Rz':[2.0,0.6]} #Quadruple the probability
-    motion_specs = {'moderate':moderate_specs,'severe1':severe_specs1,\
-                    'severe2':severe_specs2, 'severe3':severe_specs3}
+    motion_specs = {'mild':mild_specs,'moderate':moderate_specs,\
+                    'large':large_specs, 'extreme':extreme_specs}
     #
-    motion_lv = 'severe3'
     j = 1; k = 1 #legacy parameters, from training dataset script
-    rand_keys = msi._gen_key(60+case, j, k)
+    rand_keys = msi._gen_key(60+sub, j, k)
     Mtraj_GT = msi._gen_traj(rand_keys, len(U), motion_specs.get(motion_lv), specs_scale)
     # xp.save(dpath + r'/Mtraj.npy', Mtraj_GT)
     #
@@ -121,19 +118,17 @@ def main(dpath, spath_root, mpath, gt_name, test_flag, case):
     rmse_tol = 0.0 #impossible
     ssim_tol = 2.0 #impossible
     trans_axes = (0,1,2,0) 
-    cnn_flag = test_flag[0] #turn on / off CNN
-    JE_flag = test_flag[1] #turn JE algorithm on / off
+    cnn_flag = flag[0] #turn on / off CNN
+    JE_flag = flag[1] #turn JE algorithm on / off
     thresh = {'severe': 500, 'moderate': 0.1}
     if JE_flag and cnn_flag: #UNet + JE
-        spath = spath_root + r'/w_cnn_ReIm_AugmentedTraining_April-14-2025'
+        spath = dpath + r'/{}/UNetJE'.format(motion_lv)
         max_loops = 200
     elif JE_flag and not cnn_flag: #only JE
-        # spath = spath_root + r'/wo_cnn_100Iters_July-10-2024'
-        # max_loops = 100
-        spath = spath_root + r'/wo_cnn_ReIm_AugmentedTraining_April-14-2025'
+        spath = dpath + r'/{}/JE'.format(motion_lv)
         max_loops = 200
     elif not JE_flag and cnn_flag: #only UNet
-        spath = spath_root + r'/w_only_cnn_Mag_AugmentedTraining_April-14-2025'
+        spath = dpath + r'/{}/UNet'.format(motion_lv)
         max_loops = 1
     plib.Path(spath).mkdir(parents=True, exist_ok=True)
     xp.save(spath + r'/m_corrupted.npy', m_corrupted)
@@ -161,90 +156,18 @@ def main(dpath, spath_root, mpath, gt_name, test_flag, case):
 
 #%% Run main()
 if __name__ == "__main__":
-    mpath = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1F'
-    cases = [1,5,6,7]
-    # cases = [4]
-    for case in cases:
-        # test_flags = [[1,0]] #[CNN, JE]
-        test_flags = [[1,1]] #[CNN, JE]
-        for test_flag in test_flags:
-            test_case = 'Test{}'.format(case)
-            gt_name = test_case
-            # #
-            dpath = mpath + r'/{}'.format(test_case)
-            print('Processing Test Case {}'.format(test_case))
-            spath_root = dpath
-            spath, m_corrupted, m_final, m_loss_store, Mtraj_store = main(dpath, spath_root, mpath, gt_name, test_flag, case)
+    NSUBS = 5
+    motion_lv = 'moderate' #options for motion simulation specs: mild, moderate, large, extreme
+    root = os.getcwd()
+    dpath_init = root + r'/data/Simulations'
+    for sub in range(1,NSUBS+1):
+        dpath = dpath_init + r'/Sub{}'.format(sub)
+        flags = [[1,0], [0,1], [1,1]] #flags for using UNet and JE, respectively; [1,1] is UNet+JE
+        for flag in flags:
+            spath, m_corrupted, m_final, m_loss_store, Mtraj_store = main(sub, dpath, flag, motion_lv)
             xp.save(spath + r"/m_corrupted.npy", m_corrupted)
             xp.save(spath + r"/m_final.npy", m_final)
             xp.save(spath + r"/m_loss_store.npy", m_loss_store)
             xp.save(spath + r"/Mtraj_store.npy", Mtraj_store)
 
 
-'''
-
-# ----------------------------------------------------------------------
-
-#RECONSTRUCTION 
-path_M2 = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1F/Test4/wo_cnn_750Iters_July-10-2024'
-path_M3 = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1F/Test4/w_cnn_ReIm_AugmentedTraining_April-13-2025'
-
-Mtraj_GT = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1F/Test4/Mtraj.npy'
-
-Mtraj_store_M2 = np.load(path_M2 + r'/Mtraj_store.npy')
-Mtraj_store_M3 = np.load(path_M3 + r'/Mtraj_store.npy')
-
-Mtraj_est_M2 = Mtraj_store_M2[-1][0]
-Mtraj_est_M3 = Mtraj_store_M3[-1][0]
-
-Mtraj_dif = Mtraj_est_M3 - Mtraj_est_M2
-vis.plot_Mtraj(Mtraj_dif, Mtraj_dif, m_corrupted.shape)
-
-# Image Recovery step
-A_new = partial(eop._EH_E, C=C, U=U, Mtraj=Mtraj_est, \
-                res=res, lamda=0, batch=batch)
-b_new = eop.Encode_Adj(s_corrupted, C, U, Mtraj_est, res, batch=batch)
-#
-if CG_mask:
-    m_out = rec.ImageRecon(A_new, b_new, m_corrupted, mask = mask, maxiter=CG_maxiter, \
-                        tol=CG_tol, atol=CG_atol)
-else:
-    m_out = rec.ImageRecon(A_new, b_new, m_corrupted, maxiter=CG_maxiter, \
-                        tol=CG_tol, atol=CG_atol)
-
-
-m_out_M2 = m_out[-1]       
-# m_out_M2_og = np.load(path_M2 + r'/m_final.npy')                 
-m_out_M3 = m_out[-1]
-
-vis.plot_views(abs(m_out_M2))
-
-m_dif = abs(m_out_M2) - abs(m_out_M3)
-vis.plot_views(abs(m_dif))
-
-m_dif_CGIters = abs(m_out_M2) - abs(m_out_M2_og)
-vis.plot_views(abs(m_dif_CGIters))
-
-
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-path_M2 = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1F/Test4/wo_cnn_750Iters_July-10-2024'
-path_M3 = r'/home/nghiemb/PyMoCo/data/cc/test/PE1_AP/Complex/R1/Paradigm_1F/Test4/w_cnn_ReIm_AugmentedTraining_April-13-2025'
-
-DC_init = np.load(path_M3 + r"/DC_init_alt.npy")
-DC_store_M2 = np.load(path_M2 + r"/DC_store.npy"); DC_store_M2[0] = DC_init
-DC_store_M3 = np.load(path_M3 + r"/DC_store.npy"); DC_store_M3[0] = DC_init
-
-plt.figure()
-plt.plot(DC_store_M2, label = "JE")
-plt.plot(DC_store_M3, label = "UNet+JE, retrained")
-plt.xlabel("JE iteration")
-plt.ylabel("DC Loss")
-plt.title("Data Consistency Loss Trajectory for Outlier Test Case")
-plt.legend(loc = "upper right")
-plt.show()
-
-'''

@@ -1,7 +1,7 @@
 """
 MAIN SCRIPT
 Running Joint Motion and Image Estimation
-on Real Motion-Corrupted Data, with Interleaved PE1 Reordering (acquired July 2023)
+on Real Motion-Corrupted Data, with Interleaved PE1 Reordering
 """
 import os
 import pathlib as plib
@@ -11,7 +11,6 @@ import numpy as np
 
 import jax.numpy as xp
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="0" #turn off GPU pre-allocation
-# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform" #allows deallocation after object deletion
 
 import encode.encode_op as eop
 import recon.recon_op as rec
@@ -20,51 +19,32 @@ import utils.metrics as mtc
 import motion.motion_sim as msi
 
 #-------------------------------------------------------------------------------
-def main(dpath, spath_root, mpath, gt_name):
+def main(sub, dpath, flag, cerebrum_slice):
     #---------------------------------------------------------------------------
-    #-----------------------Loading Reference Data------------------------
-    #---------------------------------------------------------------------------
-    # s_corrupted = xp.load(mpath + r'/{}/npy/kdat_trunc.npy'.format(gt_name)) #NC, SI, AP, LR
-    # C_init = xp.load(mpath + r'/{}/npy/sens.npy'.format(gt_name))
-    # C = xp.transpose(C_init, (3,0,1,2)); del C_init
-    # mask = rec.getMask(C); xp.save(mpath + r'/{}/npy/m_GT_brain_mask.npy'.format(gt_name), mask)
-    # U = np.load(mpath + r'/{}/npy/samp_order.npy'.format(gt_name), allow_pickle=1) #LR, AP, SI
-    # res = xp.array([1,1,1])
-    # R_pad = (10, 10, 10)
-    # batch = 1
-    # Mtraj_init = xp.zeros((len(U), 6))
-    # m_GT = eop.Encode_Adj(s_corrupted, C, U, Mtraj_init, res, batch=batch) #E.H*s
-    # xp.save(mpath + r'/{}/npy/img_CG.npy'.format(gt_name), m_GT)
-    # del s_corrupted, C, mask, U, res, R_pad, batch, Mtraj_init, m_GT
-    #---------------------------------------------------------------------------
-    #-----------------------Loading Corrupted Data------------------------
+    #--------------------------Loading Corrupted Data---------------------------
     #---------------------------------------------------------------------------
     #Load data
     s_corrupted = xp.load(dpath + r'/kdat_trunc.npy') #NC, SI, AP, LR
-    C_init = xp.load(mpath + r'/{}/sens.npy'.format(gt_name))
+    C_init = xp.load(dpath + r'/sens.npy')
     C = xp.transpose(C_init, (3,0,1,2))
-    mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
     del C_init
     #---------------------------------------
-    U = np.load(dpath + r'/samp_order.npy', allow_pickle=1) #LR, AP, SI
-    #---------------------------------------------------------------------------
-    res = xp.array([1,1,1])
+    mask = rec.getMask(C); xp.save(dpath + r'/m_GT_brain_mask.npy', mask)
+    U = np.load(dpath + r'/samp_order.npy', allow_pickle=1)
+    res = xp.array([1,1,1]) #spatial resolution
     #---------------------------------------
-    # m_GT = xp.load(mpath + r'/{}/img_rss_trunc.npy'.format(gt_name))
-    m_GT = xp.load(mpath + r'/{}/img_CG.npy'.format(gt_name))
+    m_GT = xp.load(dpath + r'/img_CG.npy')
     maxval = abs(m_GT.flatten()).max()
-    # maxval = abs(xp.load(mpath + r'/{}/npy/img_rss_trunc.npy'.format(gt_name)).flatten()).max()
     m_GT /= maxval
     s_corrupted /= maxval
     #---------------------------------------
-    #Loading the skull-stripping mask, generated from FreeSurfer SynthStrip tool
+    #Manually masking out axial slices below the cerebellum
     cerebrum_mask = xp.ones(m_GT.shape)
-    cerebrum_slice= 175 #Julien
     cerebrum_mask = cerebrum_mask.at[cerebrum_slice:,...].set(0)
     #---------------------------------------
     #Motion trajectory
-    R_pad = (10, 10, 10)
-    batch = 1
+    R_pad = (10, 10, 10) #spatial zero-padding to avoid wrapping during rotations
+    batch = 1 #grouping shots together during estimation; batch set to 1 due to memory limits
     #---------------------------------------------------------------------------
     #------------------JOINT IMAGE RECON AND MOTION ESTIMATION------------------
     #---------------------------------------------------------------------------
@@ -82,7 +62,8 @@ def main(dpath, spath_root, mpath, gt_name):
     m_loss_store = []
     m_cnn_store = []
     Mtraj_store = []
-    #---------------------------------------------------------------------------
+    DC_store = []
+    #---------------------------------------
     #Reconstruct image using CG SENSE algorithm
     m_init = eop.Encode_Adj(s_corrupted, C, U, Mtraj_init, res, batch=batch) #E.H*s
     #Motion-corrupted reconstruction
@@ -90,7 +71,12 @@ def main(dpath, spath_root, mpath, gt_name):
     b = eop.Encode_Adj(s_corrupted, C, U, Mtraj_est, res, batch=batch)
     #
     m_corrupted = m_init
-    #----------------------------------------
+    subset = [1,2,3,4] #need to rescale for Subs 1 - 4 
+    if sub in subset:
+        maxval = xp.max(abs(m_corrupted.flatten()))
+        s_corrupted /= maxval
+        m_corrupted /= maxval
+    #---------------------------------------
     m_est_rmse = mtc.evalPE(m_corrupted, m_GT, mask)
     m_est_ssim = mtc.evalSSIM(m_corrupted, m_GT, mask=mask)
     m_loss_store.append([m_est_rmse, m_est_ssim])
@@ -110,48 +96,60 @@ def main(dpath, spath_root, mpath, gt_name):
     pads = [pad_x, pad_y]
     #---------------------------------------------------------------------------
     #Alternating image & motion estimation (coordinate descent)
-    rmse_tol = 5.0
+    rmse_tol = 0.0 #default to impossible RMSE, to max out on iters
+    ssim_tol = 1.0 #default to impossible SSIM, to max out on iters
     trans_axes = (2,1,0,180)
-    cnn_flag = 0 #turn on / off CNN
-    JE_flag = 1 #turn JE algorithm on / off
+    cnn_flag = flag[0] #turn on / off CNN
+    JE_flag = flag[1] #turn JE algorithm on / off
     thresh = {'severe': 500, 'moderate': 0.1}
     if JE_flag and cnn_flag: #UNet + JE
-        spath = spath_root + r'/w_cnn_combo_PE1_AP_CorrectMask'
-        max_loops = 50
-    elif JE_flag and not cnn_flag: #only JE
-        spath = spath_root + r'/wo_cnn_CorrectMask'
+        spath = dpath + r'/UNetJE'
         max_loops = 250
+    elif JE_flag and not cnn_flag: #only JE
+        spath = dpath + r'/JE'
+        max_loops = 250 #ie. additional 250 iterations, picking from previous run
     elif not JE_flag and cnn_flag: #only UNet
-        spath = spath_root + r'/w_only_cnn_combo_PE1_AP'
+        spath = dpath + r'/UNet'
         max_loops = 1
     plib.Path(spath).mkdir(parents=True, exist_ok=True)
     xp.save(spath + r'/m_corrupted.npy', m_corrupted)
-    dscale = 1
+    #
     #---------------------------------------------------------------------------
-    JE_params = [m_est_rmse, rmse_tol, max_loops, ME_maxiter, LS_maxiter, \
-                    CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask]
+    dscale = 1
+    continuity = 0
+    grad_tol = 0.0
+    JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, \
+                    CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
     CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath_severe, wpath_moderate, wpath_mild, thresh]
     init_est = [m_est, Mtraj_est]
     fixed_vars = [m_init, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
-    stores = [m_cnn_store, Mtraj_store, m_loss_store]
+    #
+    DC_store.append(rec.eval_TotalDC(Mtraj_est, fixed_vars, JE_params))
+    xp.save(spath + r"/DC_store.npy", DC_store)
+    DC_init_alt = rec._f(Mtraj_init, m_est=m_corrupted, C=C, res=res, U=U, R_pad=R_pad, s_corrupted=s_corrupted)
+    xp.save(spath + r"/DC_init_alt.npy", DC_init_alt)
+    #
+    stores = [m_cnn_store, Mtraj_store, m_loss_store, DC_store]
     m_est, m_loss_store, Mtraj_store, m_cnn_store = rec.JointEst(init_est, fixed_vars, \
                                                                     stores, cnn, \
                                                                     CNN_params, JE_params)
-    #
     return spath, m_corrupted, m_est, m_loss_store, Mtraj_store
 
 #%% Run main()
 if __name__ == "__main__":
-    subname = "Sub5"
-    mpath = r'/home/nghiemb/Data/TWH/MPRAGE_PE1Reordered/Scan20231116/{}'.format(subname)
-    test_case = 'scan4-FreeMotion-16shots/npy'
-    gt_name = 'scan1-ReferenceProduct/npy'
-    dpath = mpath + r'/{}'.format(test_case)
-    print('Processing Test Case {}'.format(test_case))
-    spath_root = dpath
-    spath, m_corrupted, m_final, m_loss_store, Mtraj_store = main(dpath, spath_root, mpath, gt_name)
-    xp.save(spath + r"/m_corrupted.npy", m_corrupted)
-    xp.save(spath + r"/m_final.npy", m_final)
-    xp.save(spath + r"/m_loss_store.npy", m_loss_store)
-    xp.save(spath + r"/Mtraj_store.npy", Mtraj_store)
+    NSUBS = 10
+    root = os.getcwd()
+    dpath_init = root + r'/data/InVivo'
+    cerebrum_slices = [180, 195, 200, 180, 175, 195, 215, 190, 185, 190]
+    #
+    for sub in range(1,NSUBS+1):
+        dpath = dpath_init + r'/Sub{}'.format(sub)
+        cerebrum_slice = cerebrum_slices[sub-1]
+        flags = [[1,0], [0,1], [1,1]] #flags for using UNet and JE, respectively; [1,1] is UNet+JE
+        for flag in flags:
+            spath, m_corrupted, m_final, m_loss_store, Mtraj_store = main(sub, dpath, flag, cerebrum_slice)
+            xp.save(spath + r"/m_corrupted.npy", m_corrupted)
+            xp.save(spath + r"/m_final.npy", m_final)
+            xp.save(spath + r"/m_loss_store.npy", m_loss_store)
+            xp.save(spath + r"/Mtraj_store.npy", Mtraj_store)
 
