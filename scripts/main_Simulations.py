@@ -111,8 +111,9 @@ def main(sub, dpath, flag, motion_lv):
     #Loading trained CNN model
     # NB. UNet takes in data as [LR, AP, SI]
     # For my Data (SI, AP, LR), need to transpose --> (2,1,0)
-    cnn_path = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP'
-    wpath = cnn_path + r'/weights/PE1_AP/Complex/combo/train_n240_interleaved_P1EF_2025-04-02/slices'
+    root = os.getcwd()
+    cnn_path = root + r'/cnn/3DUNet_SAP'
+    wpath = cnn_path + r'/weights/P1CD' # P1CD = "UNet_A"; P1CDEF = "UNet_B"
     pads = [11,3]
     #---------------------------------------------------------------------------
     #Alternating image & motion estimation (coordinate descent)
