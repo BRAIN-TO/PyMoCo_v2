@@ -87,10 +87,9 @@ def main(sub, dpath, flag, cerebrum_slice):
     #Loading trained CNN model
     # NB. UNet takes in data as [LR, AP, SI]
     # For my Data (SI, AP, LR), need to transpose --> (2,1,0)
-    cnn_path = r'/home/nghiemb/PyMoCo/cnn/3DUNet_SAP'
-    wpath_severe = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
-    wpath_moderate = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
-    wpath_mild = cnn_path + r'/weights/PE1_AP/Complex/{}/train_n360'.format('combo')
+    root = os.getcwd()
+    cnn_path = root + r'/cnn/3DUNet_SAP'
+    wpath = cnn_path + r'/weights/P1CD' # P1CD = "UNet_A"; P1CDEF = "UNet_B"
     pad_x = int((xp.ceil(m_est.shape[2]/32) * 32 - m_est.shape[2])/2) #along LR
     pad_y = int((xp.ceil(m_est.shape[1]/32) * 32 - m_est.shape[1])/2) #along AP
     pads = [pad_x, pad_y]
@@ -120,7 +119,7 @@ def main(sub, dpath, flag, cerebrum_slice):
     grad_tol = 0.0
     JE_params = [m_est_rmse, rmse_tol, m_est_ssim, ssim_tol, max_loops, ME_maxiter, LS_maxiter, \
                     CG_maxiter, CG_tol, CG_atol, CG_mask, batch, mask, continuity, grad_tol]
-    CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath_severe, wpath_moderate, wpath_mild, thresh]
+    CNN_params = [cnn_flag, JE_flag, trans_axes, pads, wpath, wpath, wpath, thresh]
     init_est = [m_est, Mtraj_est]
     fixed_vars = [m_init, s_corrupted, C, U, dscale, res, spath, m_GT, R_pad, cerebrum_mask]
     #
